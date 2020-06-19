@@ -2138,16 +2138,19 @@ static int iris_hfi_core_trigger_ssr(void *device,
 	}
 
 	dev = device;
-	mutex_lock(&dev->lock);
+	if (mutex_trylock(&dev->lock)) {
+		rc = call_hfi_pkt_op(dev, ssr_cmd, type, &pkt);
+		if (rc) {
+			dprintk(CVP_ERR, "%s: failed to create packet\n",
+					__func__);
+			goto err_create_pkt;
+		}
 
-	rc = call_hfi_pkt_op(dev, ssr_cmd, type, &pkt);
-	if (rc) {
-		dprintk(CVP_ERR, "%s: failed to create packet\n", __func__);
-		goto err_create_pkt;
+		if (__iface_cmdq_write(dev, &pkt))
+			rc = -ENOTEMPTY;
+	} else {
+		return -EAGAIN;
 	}
-
-	if (__iface_cmdq_write(dev, &pkt))
-		rc = -ENOTEMPTY;
 
 err_create_pkt:
 	mutex_unlock(&dev->lock);
@@ -4132,7 +4135,23 @@ static void power_off_iris2(struct iris_hfi_device *device)
 	__write_register(device,
 		CVP_WRAPPER_DEBUG_BRIDGE_LPI_CONTROL, 0x7);
 
-	usleep_range(50, 100);
+	reg_status = 0;
+	count = 0;
+	while ((reg_status != 0x7) && count < max_count) {
+		lpi_status = __read_register(device,
+			CVP_WRAPPER_DEBUG_BRIDGE_LPI_STATUS);
+		reg_status = lpi_status & 0x7;
+		/* Wait for debug bridge lpi status to be set */
+		usleep_range(50, 100);
+		count++;
+	}
+	dprintk(CVP_PWR,
+		"DBLP Set : lpi_status %d reg_status %d (count %d)\n",
+		lpi_status, reg_status, count);
+	if (count == max_count) {
+		dprintk(CVP_WARN,
+			"DBLP Set: status %x %x\n", reg_status, lpi_status);
+	}
 
 	/* HPG 6.1.2 Step 4, debug bridge to lpi release */
 	__write_register(device,
@@ -4276,7 +4295,7 @@ static int __load_fw(struct iris_hfi_device *device)
 			|| device->res->use_non_secure_pil) {
 		if (!device->resources.fw.cookie)
 			device->resources.fw.cookie =
-				subsystem_get_with_fwname("cvpss",
+				subsystem_get_with_fwname("evass",
 				device->res->fw_name);
 
 		if (IS_ERR_OR_NULL(device->resources.fw.cookie)) {

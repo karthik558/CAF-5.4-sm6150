@@ -646,8 +646,19 @@ config MSM_PM
 	bool
 	select MSM_IDLE_STATS if DEBUG_FS
 	select QTI_SYSTEM_PM if QCOM_RPMH
+	select QTI_SYSTEM_PM_RPM if MSM_RPM_SMD && QGKI && QCOM_MPM
+	bool "Qualcomm Technologies, Inc. (QTI) Power Management Drivers"
+	help
+	  Platform specific power driver to manage cores and l2 low power
+	  modes. It interface with various system driver and put the cores
+	  into low power modes. It implements OS initiated scheme and
+	  determines last CPU to call into PSCI for cluster Low power
+	  modes.
 
 config QTI_SYSTEM_PM
+	bool
+
+config QTI_SYSTEM_PM_RPM
 	bool
 
 if MSM_PM
@@ -806,7 +817,7 @@ config QCOM_GUESTVM
 
 config QCOM_HYP_CORE_CTL
 	bool "CPU reservation scheme for Hypervisor"
-	depends on QCOM_GUESTVM
+	depends on QCOM_GUESTVM && SCHED_WALT
 	help
 	  This driver reserve the specified CPUS by isolating them. The reserved
 	  CPUs can be assigned to the other guest OS by the hypervisor.

@@ -39,6 +39,7 @@
 #define ION_SECURE_DISPLAY_HEAP_NAME "secure_display"
 #define ION_AUDIO_HEAP_NAME    "audio"
 #define ION_TUI_CARVEOUT_HEAP_NAME "tui_carveout"
+#define ION_DISPLAY_HEAP_NAME "display"
 
 /**
  * Debug feature. Make ION allocations DMA
@@ -121,6 +122,11 @@ struct msm_ion_heap {
 	struct device *dev;
 	struct msm_ion_heap_ops *msm_heap_ops;
 	struct ion_heap ion_heap;
+};
+
+struct msm_ion_buf_lock_state {
+	bool locked;
+	int vma_count;
 };
 
 /**

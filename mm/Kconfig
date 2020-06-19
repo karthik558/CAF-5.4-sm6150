@@ -558,6 +558,14 @@ config CMA_PCP_LISTS
 	  allocations, as the amount of non-CMA memory to be reclaimed should
 	  be smaller.
 
+config LIMIT_MOVABLE_ZONE_ALLOC
+	bool "Limit types of allocations from Movable zone"
+	help
+	  Ensure that only allocations which include __GFP_OFFLINABLE can be
+	  satisfied from zone Movable. This restriction helps reduce the
+	  likelihood of a page in the movable zone being pinned which would
+	  prevent memory from being offlined.
+
 config MEM_SOFT_DIRTY
 	bool "Track memory changes"
 	depends on CHECKPOINT_RESTORE && HAVE_ARCH_SOFT_DIRTY && PROC_FS
@@ -758,6 +766,16 @@ config PERCPU_STATS
 	  information includes global and per chunk statistics, which can
 	  be used to help understand percpu memory usage.
 
+config MM_STAT_UNRECLAIMABLE_PAGES
+	default y
+	depends on QGKI
+	bool "Enable counter for unreclaimable pages"
+	help
+	  Unreclaimable pages counters accounts the pages that cannot be
+	  reclaimed under memory pressure. These include mm rss and global
+	  counter. This option allows the enabling of the mm rss and global
+	  unreclaimables pages counters on QGKI systems.
+
 config HAVE_USERSPACE_LOW_MEMORY_KILLER
 	bool "Configure reclaim paths if there is a userspace LMK"
 	default n
@@ -768,6 +786,29 @@ config HAVE_USERSPACE_LOW_MEMORY_KILLER
 	  points) and performance purposes (e.g. preventing log-spew
 	  when the OOM killer and userspace memory killer both have the
 	  potential to run).
+
+config ARCH_SUPPORTS_SPECULATIVE_PAGE_FAULT
+       def_bool n
+
+config SPECULATIVE_PAGE_FAULT
+       bool "Speculative page faults"
+       default y
+       depends on ARCH_SUPPORTS_SPECULATIVE_PAGE_FAULT
+       depends on MMU && SMP
+       depends on QGKI
+       help
+         Try to handle user space page faults without holding the mmap_sem.
+
+	 This should allow better concurrency for massively threaded process
+	 since the page fault handler will not wait for other threads memory
+	 layout change to be done, assuming that this change is done in another
+	 part of the process's memory space. This type of page fault is named
+	 speculative page fault.
+
+	 If the speculative page fault fails because of a concurrency is
+	 detected or because underlying PMD or PTE tables are not yet
+	 allocating, it is failing its processing and a classic page fault
+	 is then tried.
 
 config GUP_BENCHMARK
 	bool "Enable infrastructure for get_user_pages_fast() benchmarking"
@@ -844,5 +885,8 @@ config PROCESS_RECLAIM
 	 (echo file > /proc/PID/reclaim) reclaims file-backed pages only.
 	 (echo anon > /proc/PID/reclaim) reclaims anonymous pages only.
 	 (echo all > /proc/PID/reclaim) reclaims all pages.
+
+	 (echo addr size-byte > /proc/PID/reclaim) reclaims pages in
+	 (addr, addr + size-bytes) of the process.
 
 	 Any other value is ignored.

@@ -447,6 +447,7 @@ struct fastrpc_apps {
 	struct wakeup_source *wake_source_secure;
 	/* Non-secure subsystem like CDSP will use regular client */
 	struct wakeup_source *wake_source;
+	uint32_t duplicate_rsp_err_cnt;
 };
 
 struct fastrpc_mmap {
@@ -953,12 +954,23 @@ static void fastrpc_mmap_free(struct fastrpc_mmap *map, uint32_t flags)
 {
 	struct fastrpc_apps *me = &gfa;
 	struct fastrpc_file *fl;
-	int vmid;
+	int vmid, cid = -1, err = 0;
 	struct fastrpc_session_ctx *sess;
 
 	if (!map)
 		return;
 	fl = map->fl;
+	if (fl && !(map->flags == ADSP_MMAP_HEAP_ADDR ||
+				map->flags == ADSP_MMAP_REMOTE_HEAP_ADDR)) {
+		cid = fl->cid;
+		VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS);
+		if (err) {
+			err = -ECHRNG;
+			pr_err("adsprpc: ERROR:%s, Invalid channel id: %d, err:%d\n",
+				__func__, cid, err);
+			return;
+		}
+	}
 	if (map->flags == ADSP_MMAP_HEAP_ADDR ||
 				map->flags == ADSP_MMAP_REMOTE_HEAP_ADDR) {
 		map->refs--;
@@ -1248,6 +1260,10 @@ static int fastrpc_mmap_create(struct fastrpc_file *fl, int fd,
 		}
 		trace_fastrpc_dma_map(fl->cid, fd, map->phys, map->size,
 			len, mflags, map->attach->dma_map_attrs);
+		if (map->size < len) {
+			err = -EFAULT;
+			goto bail;
+		}
 
 		vmid = fl->apps->channel[fl->cid].vmid;
 		if (vmid) {
@@ -2462,9 +2478,17 @@ static int fastrpc_invoke_send(struct smq_invoke_ctx *ctx,
 {
 	struct smq_msg *msg = &ctx->msg;
 	struct fastrpc_file *fl = ctx->fl;
-	struct fastrpc_channel_ctx *channel_ctx = &fl->apps->channel[fl->cid];
-	int err = 0;
+	struct fastrpc_channel_ctx *channel_ctx = NULL;
+	int err = 0, cid = -1;
 
+	cid = fl->cid;
+	VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS);
+	if (err) {
+		err = -ECHRNG;
+		goto bail;
+	}
+
+	channel_ctx = &fl->apps->channel[fl->cid];
 	mutex_lock(&channel_ctx->smd_mutex);
 	msg->pid = fl->tgid;
 	msg->tid = current->pid;
@@ -2684,11 +2708,12 @@ static int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 {
 	struct smq_invoke_ctx *ctx = NULL;
 	struct fastrpc_ioctl_invoke *invoke = &inv->inv;
-	int err = 0, interrupted = 0, cid = fl->cid;
+	int err = 0, interrupted = 0, cid = -1;
 	struct timespec64 invoket = {0};
 	int64_t *perf_counter = NULL;
 	bool isasyncinvoke = false;
 
+	cid = fl->cid;
 	VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS &&
 			fl->sctx != NULL);
 	if (err) {
@@ -3591,7 +3616,7 @@ static int fastrpc_get_info_from_kernel(
 	 * kernel
 	 */
 	if (cap->attribute_ID >= FASTRPC_MAX_ATTRIBUTES) {
-		err = EOVERFLOW;
+		err = -EOVERFLOW;
 		cap->capability = 0;
 		goto bail;
 	}
@@ -4517,7 +4542,7 @@ static int fastrpc_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
 	struct smq_invoke_ctx *ctx = NULL;
 	struct fastrpc_apps *me = &gfa;
 	uint32_t index, rsp_flags = 0, early_wake_time = 0;
-	int err = 0, cid = -1;
+	int err = 0, cid = -1, ignore_rpmsg_err = 0;
 	struct fastrpc_channel_ctx *chan = NULL;
 	unsigned long irq_flags = 0;
 
@@ -4550,14 +4575,18 @@ static int fastrpc_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
 
 	spin_lock_irqsave(&chan->ctxlock, irq_flags);
 	ctx = chan->ctxtable[index];
-	VERIFY(err, !IS_ERR_OR_NULL(ctx));
-	if (err)
+	VERIFY(err, !IS_ERR_OR_NULL(ctx) &&
+		(ctx->ctxid == (rsp->ctx & ~CONTEXT_PD_CHECK)) &&
+		ctx->magic == FASTRPC_CTX_MAGIC);
+	if (err) {
+		/*
+		 * Received an anticipatory COMPLETE_SIGNAL from DSP for a
+		 * context after CPU successfully polling on memory and
+		 * completed processing of context. Ignore the message.
+		 */
+		ignore_rpmsg_err = (rsp_flags == COMPLETE_SIGNAL) ? 1 : 0;
 		goto bail_unlock;
-
-	VERIFY(err, ((ctx->ctxid == (rsp->ctx & ~CONTEXT_PD_CHECK)) &&
-			ctx->magic == FASTRPC_CTX_MAGIC));
-	if (err)
-		goto bail_unlock;
+	}
 
 	if (rspv2) {
 		VERIFY(err, rspv2->version == FASTRPC_RSP_VERSION2);
@@ -4569,11 +4598,15 @@ bail_unlock:
 	spin_unlock_irqrestore(&chan->ctxlock, irq_flags);
 bail:
 	if (err) {
-		ADSPRPC_ERR(
-			"invalid response data %pK, len %d from remote subsystem err %d\n",
-			data, len, err);
 		err = -ENOKEY;
+		if (!ignore_rpmsg_err)
+			ADSPRPC_ERR(
+				"invalid response data %pK, len %d from remote subsystem err %d\n",
+				data, len, err);
+		else
+			me->duplicate_rsp_err_cnt++;
 	}
+
 	return err;
 }
 
@@ -4915,7 +4948,7 @@ static const struct file_operations debugfs_fops = {
 static int fastrpc_channel_open(struct fastrpc_file *fl)
 {
 	struct fastrpc_apps *me = &gfa;
-	int cid, err = 0;
+	int cid = -1, err = 0;
 
 	VERIFY(err, fl && fl->sctx && fl->cid >= 0 && fl->cid < NUM_CHANNELS);
 	if (err) {
