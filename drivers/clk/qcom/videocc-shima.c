@@ -8,6 +8,8 @@
 #include <linux/module.h>
 #include <linux/of_device.h>
 #include <linux/of.h>
+#include <linux/pm_clock.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 
 #include <dt-bindings/clock/qcom,videocc-shima.h>
@@ -32,11 +34,12 @@ enum {
 };
 
 static struct pll_vco lucid_5lpe_vco[] = {
-	{ 249600000, 1750000000, 0 },
+	{ 249600000, 1800000000, 0 },
 };
 
+/* 604.8MHz Configuration */
 static const struct alpha_pll_config video_pll0_config = {
-	.l = 0x25,
+	.l = 0x1F,
 	.alpha = 0x8000,
 	.config_ctl_val = 0x20485699,
 	.config_ctl_hi_val = 0x00002261,
@@ -70,11 +73,13 @@ static struct clk_alpha_pll video_pll0 = {
 				[VDD_MIN] = 615000000,
 				[VDD_LOW] = 1066000000,
 				[VDD_LOW_L1] = 1500000000,
-				[VDD_NOMINAL] = 1750000000},
+				[VDD_NOMINAL] = 1750000000,
+				[VDD_HIGH] = 1800000000},
 		},
 	},
 };
 
+/* 840MHz Configuration */
 static const struct alpha_pll_config video_pll1_config = {
 	.l = 0x2B,
 	.alpha = 0xC000,
@@ -110,7 +115,8 @@ static struct clk_alpha_pll video_pll1 = {
 				[VDD_MIN] = 615000000,
 				[VDD_LOW] = 1066000000,
 				[VDD_LOW_L1] = 1500000000,
-				[VDD_NOMINAL] = 1750000000},
+				[VDD_NOMINAL] = 1750000000,
+				[VDD_HIGH] = 1800000000},
 		},
 	},
 };
@@ -346,7 +352,7 @@ static struct clk_regmap_div video_cc_mvs1c_div2_div_clk_src = {
 
 static struct clk_branch video_cc_ahb_clk = {
 	.halt_reg = 0xe58,
-	.halt_check = BRANCH_HALT,
+	.halt_check = BRANCH_HALT_VOTED,
 	.hwcg_reg = 0xe58,
 	.hwcg_bit = 1,
 	.clkr = {
@@ -444,7 +450,7 @@ static struct clk_branch video_cc_mvs1_div2_clk = {
 
 static struct clk_branch video_cc_mvs1c_clk = {
 	.halt_reg = 0xcd4,
-	.halt_check = BRANCH_HALT_VOTED,
+	.halt_check = BRANCH_HALT,
 	.clkr = {
 		.enable_reg = 0xcd4,
 		.enable_mask = BIT(0),
@@ -575,19 +581,42 @@ static int video_cc_shima_probe(struct platform_device *pdev)
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 
+	pm_runtime_enable(&pdev->dev);
+	ret = pm_clk_create(&pdev->dev);
+	if (ret)
+		goto disable_pm_runtime;
+
+	ret = pm_clk_add(&pdev->dev, "cfg_ahb");
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Unable to get ahb clock handle\n");
+		goto destroy_pm_clk;
+	}
+
 	clk_lucid_5lpe_pll_configure(&video_pll0, regmap, &video_pll0_config);
 	clk_lucid_5lpe_pll_configure(&video_pll1, regmap, &video_pll1_config);
 
 	ret = qcom_cc_really_probe(pdev, &video_cc_shima_desc, regmap);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to register VIDEO CC clocks\n");
-		return ret;
+		goto destroy_pm_clk;
 	}
 
 	dev_info(&pdev->dev, "Registered VIDEO CC clocks\n");
 
+	return 0;
+
+destroy_pm_clk:
+	pm_clk_destroy(&pdev->dev);
+
+disable_pm_runtime:
+	pm_runtime_disable(&pdev->dev);
+
 	return ret;
 }
+
+static const struct dev_pm_ops video_cc_shima_pm_ops = {
+	SET_RUNTIME_PM_OPS(pm_clk_suspend, pm_clk_resume, NULL)
+};
 
 static void video_cc_shima_sync_state(struct device *dev)
 {
@@ -600,6 +629,7 @@ static struct platform_driver video_cc_shima_driver = {
 		.name = "video_cc-shima",
 		.of_match_table = video_cc_shima_match_table,
 		.sync_state = video_cc_shima_sync_state,
+		.pm = &video_cc_shima_pm_ops,
 	},
 };
 

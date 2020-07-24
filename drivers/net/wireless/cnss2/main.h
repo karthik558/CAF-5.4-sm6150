@@ -26,7 +26,7 @@
 #define RECOVERY_TIMEOUT		60000
 #define WLAN_WD_TIMEOUT_MS		60000
 #define WLAN_COLD_BOOT_CAL_TIMEOUT	60000
-#define WLAN_DRIVER_LOAD_TIMEOUT	90000
+#define WLAN_MISSION_MODE_TIMEOUT	30000
 #define TIME_CLOCK_FREQ_HZ		19200000
 #define CNSS_RAMDUMP_MAGIC		0x574C414E
 #define CNSS_RAMDUMP_VERSION		0
@@ -238,6 +238,7 @@ enum cnss_driver_state {
 	CNSS_IN_SUSPEND_RESUME = 15,
 	CNSS_IN_REBOOT,
 	CNSS_COLD_BOOT_CAL_DONE,
+	CNSS_IN_PANIC,
 };
 
 struct cnss_recovery_data {
@@ -400,7 +401,6 @@ struct cnss_plat_data {
 	bool cbc_enabled;
 	u8 use_nv_mac;
 	u8 set_wlaon_pwr_ctrl;
-	struct kobject *shutdown_kobj;
 };
 
 #ifdef CONFIG_ARCH_QCOM

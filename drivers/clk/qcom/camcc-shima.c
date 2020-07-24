@@ -9,6 +9,8 @@
 #include <linux/module.h>
 #include <linux/of_device.h>
 #include <linux/of.h>
+#include <linux/pm_clock.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 
 #include <dt-bindings/clock/qcom,camcc-shima.h>
@@ -40,13 +42,14 @@ enum {
 };
 
 static struct pll_vco lucid_5lpe_vco[] = {
-	{ 249600000, 1750000000, 0 },
+	{ 249600000, 1800000000, 0 },
 };
 
 static struct pll_vco zonda_5lpe_vco[] = {
 	{ 595200000, 3600000000, 0 },
 };
 
+/* 1200MHz Configuration */
 static const struct alpha_pll_config cam_cc_pll0_config = {
 	.l = 0x3E,
 	.alpha = 0x8000,
@@ -82,7 +85,8 @@ static struct clk_alpha_pll cam_cc_pll0 = {
 				[VDD_MIN] = 615000000,
 				[VDD_LOW] = 1066000000,
 				[VDD_LOW_L1] = 1500000000,
-				[VDD_NOMINAL] = 1750000000},
+				[VDD_NOMINAL] = 1750000000,
+				[VDD_HIGH] = 1800000000},
 		},
 	},
 };
@@ -133,6 +137,7 @@ static struct clk_alpha_pll_postdiv cam_cc_pll0_out_odd = {
 	},
 };
 
+/* 600MHz Configuration */
 static const struct alpha_pll_config cam_cc_pll1_config = {
 	.l = 0x1F,
 	.alpha = 0x4000,
@@ -168,7 +173,8 @@ static struct clk_alpha_pll cam_cc_pll1 = {
 				[VDD_MIN] = 615000000,
 				[VDD_LOW] = 1066000000,
 				[VDD_LOW_L1] = 1500000000,
-				[VDD_NOMINAL] = 1750000000},
+				[VDD_NOMINAL] = 1750000000,
+				[VDD_HIGH] = 1800000000},
 		},
 	},
 };
@@ -196,6 +202,7 @@ static struct clk_alpha_pll_postdiv cam_cc_pll1_out_even = {
 	},
 };
 
+/* 960MHz Configuration */
 static const struct alpha_pll_config cam_cc_pll2_config = {
 	.l = 0x32,
 	.alpha = 0x0,
@@ -299,6 +306,7 @@ static struct clk_alpha_pll_postdiv cam_cc_pll2_out_early = {
 	},
 };
 
+/* 676MHz Configuration */
 static const struct alpha_pll_config cam_cc_pll3_config = {
 	.l = 0x23,
 	.alpha = 0x3555,
@@ -334,7 +342,8 @@ static struct clk_alpha_pll cam_cc_pll3 = {
 				[VDD_MIN] = 615000000,
 				[VDD_LOW] = 1066000000,
 				[VDD_LOW_L1] = 1500000000,
-				[VDD_NOMINAL] = 1750000000},
+				[VDD_NOMINAL] = 1750000000,
+				[VDD_HIGH] = 1800000000},
 		},
 	},
 };
@@ -362,6 +371,7 @@ static struct clk_alpha_pll_postdiv cam_cc_pll3_out_even = {
 	},
 };
 
+/* 676MHz Configuration */
 static const struct alpha_pll_config cam_cc_pll4_config = {
 	.l = 0x23,
 	.alpha = 0x3555,
@@ -397,7 +407,8 @@ static struct clk_alpha_pll cam_cc_pll4 = {
 				[VDD_MIN] = 615000000,
 				[VDD_LOW] = 1066000000,
 				[VDD_LOW_L1] = 1500000000,
-				[VDD_NOMINAL] = 1750000000},
+				[VDD_NOMINAL] = 1750000000,
+				[VDD_HIGH] = 1800000000},
 		},
 	},
 };
@@ -425,6 +436,7 @@ static struct clk_alpha_pll_postdiv cam_cc_pll4_out_even = {
 	},
 };
 
+/* 676MHz Configuration */
 static const struct alpha_pll_config cam_cc_pll5_config = {
 	.l = 0x23,
 	.alpha = 0x3555,
@@ -460,7 +472,8 @@ static struct clk_alpha_pll cam_cc_pll5 = {
 				[VDD_MIN] = 615000000,
 				[VDD_LOW] = 1066000000,
 				[VDD_LOW_L1] = 1500000000,
-				[VDD_NOMINAL] = 1750000000},
+				[VDD_NOMINAL] = 1750000000,
+				[VDD_HIGH] = 1800000000},
 		},
 	},
 };
@@ -488,6 +501,7 @@ static struct clk_alpha_pll_postdiv cam_cc_pll5_out_even = {
 	},
 };
 
+/* 960MHz Configuration */
 static const struct alpha_pll_config cam_cc_pll6_config = {
 	.l = 0x32,
 	.alpha = 0x0,
@@ -523,7 +537,8 @@ static struct clk_alpha_pll cam_cc_pll6 = {
 				[VDD_MIN] = 615000000,
 				[VDD_LOW] = 1066000000,
 				[VDD_LOW_L1] = 1500000000,
-				[VDD_NOMINAL] = 1750000000},
+				[VDD_NOMINAL] = 1750000000,
+				[VDD_HIGH] = 1800000000},
 		},
 	},
 };
@@ -765,6 +780,7 @@ static struct clk_rcg2 cam_cc_cci_1_clk_src = {
 
 static const struct freq_tbl ftbl_cam_cc_cphy_rx_clk_src[] = {
 	F(19200000, P_BI_TCXO, 1, 0, 0),
+	F(320000000, P_CAM_CC_PLL6_OUT_EVEN, 1.5, 0, 0),
 	F(400000000, P_CAM_CC_PLL0_OUT_ODD, 1, 0, 0),
 	{ }
 };
@@ -786,7 +802,8 @@ static struct clk_rcg2 cam_cc_cphy_rx_clk_src = {
 		.vdd_class = &vdd_cx,
 		.num_rate_max = VDD_NUM,
 		.rate_max = (unsigned long[VDD_NUM]) {
-			[VDD_LOWER] = 400000000},
+			[VDD_LOWER] = 320000000,
+			[VDD_LOW] = 400000000},
 	},
 };
 
@@ -1020,12 +1037,18 @@ static struct clk_rcg2 cam_cc_ife_0_clk_src = {
 	},
 };
 
+static const struct freq_tbl ftbl_cam_cc_ife_0_csid_clk_src[] = {
+	F(19200000, P_BI_TCXO, 1, 0, 0),
+	F(400000000, P_CAM_CC_PLL0_OUT_ODD, 1, 0, 0),
+	{ }
+};
+
 static struct clk_rcg2 cam_cc_ife_0_csid_clk_src = {
 	.cmd_rcgr = 0xa040,
 	.mnd_width = 0,
 	.hid_width = 5,
 	.parent_map = cam_cc_parent_map_0,
-	.freq_tbl = ftbl_cam_cc_cphy_rx_clk_src,
+	.freq_tbl = ftbl_cam_cc_ife_0_csid_clk_src,
 	.enable_safe_config = true,
 	.clkr.hw.init = &(struct clk_init_data){
 		.name = "cam_cc_ife_0_csid_clk_src",
@@ -1080,7 +1103,7 @@ static struct clk_rcg2 cam_cc_ife_1_csid_clk_src = {
 	.mnd_width = 0,
 	.hid_width = 5,
 	.parent_map = cam_cc_parent_map_0,
-	.freq_tbl = ftbl_cam_cc_cphy_rx_clk_src,
+	.freq_tbl = ftbl_cam_cc_ife_0_csid_clk_src,
 	.enable_safe_config = true,
 	.clkr.hw.init = &(struct clk_init_data){
 		.name = "cam_cc_ife_1_csid_clk_src",
@@ -1135,7 +1158,7 @@ static struct clk_rcg2 cam_cc_ife_2_csid_clk_src = {
 	.mnd_width = 0,
 	.hid_width = 5,
 	.parent_map = cam_cc_parent_map_0,
-	.freq_tbl = ftbl_cam_cc_cphy_rx_clk_src,
+	.freq_tbl = ftbl_cam_cc_ife_0_csid_clk_src,
 	.enable_safe_config = true,
 	.clkr.hw.init = &(struct clk_init_data){
 		.name = "cam_cc_ife_2_csid_clk_src",
@@ -1185,7 +1208,7 @@ static struct clk_rcg2 cam_cc_ife_lite_csid_clk_src = {
 	.mnd_width = 0,
 	.hid_width = 5,
 	.parent_map = cam_cc_parent_map_0,
-	.freq_tbl = ftbl_cam_cc_cphy_rx_clk_src,
+	.freq_tbl = ftbl_cam_cc_ife_0_csid_clk_src,
 	.enable_safe_config = true,
 	.clkr.hw.init = &(struct clk_init_data){
 		.name = "cam_cc_ife_lite_csid_clk_src",
@@ -2737,6 +2760,17 @@ static int cam_cc_shima_probe(struct platform_device *pdev)
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 
+	pm_runtime_enable(&pdev->dev);
+	ret = pm_clk_create(&pdev->dev);
+	if (ret)
+		goto disable_pm_runtime;
+
+	ret = pm_clk_add(&pdev->dev, "cfg_ahb");
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Unable to get ahb clock handle\n");
+		goto destroy_pm_clk;
+	}
+
 	clk_lucid_5lpe_pll_configure(&cam_cc_pll0, regmap, &cam_cc_pll0_config);
 	clk_lucid_5lpe_pll_configure(&cam_cc_pll1, regmap, &cam_cc_pll1_config);
 	clk_zonda_5lpe_pll_configure(&cam_cc_pll2, regmap, &cam_cc_pll2_config);
@@ -2748,13 +2782,25 @@ static int cam_cc_shima_probe(struct platform_device *pdev)
 	ret = qcom_cc_really_probe(pdev, &cam_cc_shima_desc, regmap);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to register CAM CC clocks\n");
-		return ret;
+		goto destroy_pm_clk;
 	}
 
 	dev_info(&pdev->dev, "Registered CAM CC clocks\n");
 
+	return 0;
+
+destroy_pm_clk:
+	pm_clk_destroy(&pdev->dev);
+
+disable_pm_runtime:
+	pm_runtime_disable(&pdev->dev);
+
 	return ret;
 }
+
+static const struct dev_pm_ops cam_cc_shima_pm_ops = {
+	SET_RUNTIME_PM_OPS(pm_clk_suspend, pm_clk_resume, NULL)
+};
 
 static void cam_cc_shima_sync_state(struct device *dev)
 {
@@ -2767,6 +2813,7 @@ static struct platform_driver cam_cc_shima_driver = {
 		.name = "cam_cc-shima",
 		.of_match_table = cam_cc_shima_match_table,
 		.sync_state = cam_cc_shima_sync_state,
+		.pm = &cam_cc_shima_pm_ops,
 	},
 };
 

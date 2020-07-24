@@ -8,6 +8,7 @@
 #include <linux/reset-controller.h>
 #include <linux/reset.h>
 #include <linux/phy/phy.h>
+#include <linux/pm_qos.h>
 #include "ufshcd.h"
 #ifdef CONFIG_SCSI_UFSHCD_QTI
 #include "unipro.h"
@@ -164,7 +165,6 @@ enum ufs_qcom_phy_init_type {
 	 UFS_QCOM_DBG_PRINT_TEST_BUS_EN)
 
 /* QUniPro Vendor specific attributes */
-#define PA_VS_STATUS_REG1	0x9001
 #define PA_VS_CONFIG_REG1	0x9000
 #define SAVECONFIGTIME_MODE_MASK	0x6000
 #define DME_VS_CORE_CLK_CTRL	0xD002
@@ -269,6 +269,29 @@ struct qcom_bus_scale_data {
 	const char *name;
 };
 
+struct qos_cpu_group {
+	cpumask_t mask;
+	unsigned int *votes;
+	struct dev_pm_qos_request *qos_req;
+	bool voted;
+	struct work_struct vwork;
+	struct ufs_qcom_host *host;
+	unsigned int curr_vote;
+};
+
+struct ufs_qcom_qos_req {
+	struct qos_cpu_group *qcg;
+	unsigned int num_groups;
+	struct workqueue_struct *workq;
+};
+
+/* Check for QOS_POWER when added to DT */
+enum constraint {
+	QOS_PERF,
+	QOS_POWER,
+	QOS_MAX,
+};
+
 struct ufs_qcom_host {
 	/*
 	 * Set this capability if host controller supports the QUniPro mode
@@ -338,6 +361,10 @@ struct ufs_qcom_host {
 	/* Protect the usage of is_phy_pwr_on against racing */
 	struct mutex phy_mutex;
 	bool err_occurred;
+	/* FlashPVL entries */
+	atomic_t scale_up;
+	atomic_t clks_on;
+	struct ufs_qcom_qos_req *ufs_qos;
 };
 
 static inline u32
