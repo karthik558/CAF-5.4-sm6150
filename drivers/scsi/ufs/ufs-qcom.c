@@ -993,8 +993,7 @@ static int ufs_qcom_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 			err = ufs_qcom_disable_vreg(hba->dev,
 					host->vddp_ref_clk);
 		if (host->vccq_parent && !hba->auto_bkops_enabled)
-			ufs_qcom_config_vreg(hba->dev,
-					host->vccq_parent, false);
+			ufs_qcom_disable_vreg(hba->dev, host->vccq_parent);
 		if (!err)
 			err = ufs_qcom_unvote_qos_all(hba);
 	}
@@ -1011,8 +1010,9 @@ static int ufs_qcom_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 				   hba->spm_lvl > UFS_PM_LVL_3))
 		ufs_qcom_enable_vreg(hba->dev,
 				      host->vddp_ref_clk);
+
 	if (host->vccq_parent)
-		ufs_qcom_config_vreg(hba->dev, host->vccq_parent, true);
+		ufs_qcom_enable_vreg(hba->dev, host->vccq_parent);
 
 	err = ufs_qcom_enable_lane_clks(host);
 	if (err)
@@ -1598,6 +1598,28 @@ out:
 	return err;
 }
 
+static inline bool
+ufshcd_is_valid_pm_lvl(enum ufs_pm_level lvl)
+{
+	return lvl >= 0 && lvl < UFS_PM_LVL_MAX;
+}
+
+static void ufshcd_parse_pm_levels(struct ufs_hba *hba)
+{
+	struct device *dev = hba->dev;
+	struct device_node *np = dev->of_node;
+	enum ufs_pm_level rpm_lvl = UFS_PM_LVL_MAX, spm_lvl = UFS_PM_LVL_MAX;
+
+	if (!np)
+		return;
+	if (!of_property_read_u32(np, "rpm-level", &rpm_lvl) &&
+		ufshcd_is_valid_pm_lvl(rpm_lvl))
+		hba->rpm_lvl = rpm_lvl;
+	if (!of_property_read_u32(np, "spm-level", &spm_lvl) &&
+		ufshcd_is_valid_pm_lvl(spm_lvl))
+		hba->spm_lvl = spm_lvl;
+}
+
 static int ufs_qcom_apply_dev_quirks(struct ufs_hba *hba)
 {
 	unsigned long flags;
@@ -1618,6 +1640,11 @@ static int ufs_qcom_apply_dev_quirks(struct ufs_hba *hba)
 
 	if (hba->dev_info.wmanufacturerid == UFS_VENDOR_WDC)
 		hba->dev_quirks |= UFS_DEVICE_QUIRK_HOST_PA_TACTIVATE;
+
+	ufshcd_parse_pm_levels(hba);
+
+	if (hba->dev_info.wmanufacturerid == UFS_VENDOR_MICRON)
+		hba->dev_quirks |= UFS_DEVICE_QUIRK_DELAY_BEFORE_LPM;
 
 	return err;
 }
@@ -2561,9 +2588,9 @@ static int ufs_qcom_init(struct ufs_hba *hba)
 	err = ufs_qcom_parse_reg_info(host, "qcom,vccq-parent",
 				      &host->vccq_parent);
 	if (host->vccq_parent) {
-		err = ufs_qcom_config_vreg(hba->dev, host->vccq_parent, true);
+		err = ufs_qcom_enable_vreg(dev, host->vccq_parent);
 		if (err) {
-			dev_err(dev, "%s: failed vccq-parent set load: %d\n",
+			dev_err(dev, "%s: failed enable vccq-parent err=%d\n",
 				__func__, err);
 			goto out_disable_vddp;
 		}
@@ -2571,7 +2598,7 @@ static int ufs_qcom_init(struct ufs_hba *hba)
 
 	err = ufs_qcom_init_lane_clks(host);
 	if (err)
-		goto out_set_load_vccq_parent;
+		goto out_disable_vccq_parent;
 
 	ufs_qcom_parse_pm_level(hba);
 	ufs_qcom_parse_limits(host);
@@ -2615,9 +2642,9 @@ static int ufs_qcom_init(struct ufs_hba *hba)
 	ufs_qcom_qos_init(hba);
 	goto out;
 
-out_set_load_vccq_parent:
+out_disable_vccq_parent:
 	if (host->vccq_parent)
-		ufs_qcom_config_vreg(hba->dev, host->vccq_parent, false);
+		ufs_qcom_disable_vreg(dev, host->vccq_parent);
 out_disable_vddp:
 	if (host->vddp_ref_clk)
 		ufs_qcom_disable_vreg(dev, host->vddp_ref_clk);
@@ -3079,6 +3106,14 @@ static void ufs_qcom_print_utp_hci_testbus(struct ufs_hba *hba)
 static void ufshcd_print_fsm_state(struct ufs_hba *hba)
 {
 	int err = 0, tx_fsm_val = 0, rx_fsm_val = 0;
+	unsigned long flags;
+
+	spin_lock_irqsave(hba->host->host_lock, flags);
+	if (hba->active_uic_cmd) {
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+		return;
+	}
+	spin_unlock_irqrestore(hba->host->host_lock, flags);
 
 	err = ufshcd_dme_get(hba,
 			     UIC_ARG_MIB_SEL(MPHY_TX_FSM_STATE,
