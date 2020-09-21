@@ -13,6 +13,7 @@
 #include <linux/reset-controller.h>
 #include <linux/interconnect.h>
 #include <linux/phy/phy-qcom-ufs.h>
+#include <linux/clk/qcom.h>
 #include <linux/devfreq.h>
 #include <linux/cpu.h>
 #include <linux/blk-mq.h>
@@ -81,7 +82,7 @@ static int ufs_qcom_init_sysfs(struct ufs_hba *hba);
 static int ufs_qcom_update_qos_constraints(struct qos_cpu_group *qcg,
 					   enum constraint type);
 static int ufs_qcom_unvote_qos_all(struct ufs_hba *hba);
-
+static void ufs_qcom_parse_g4_workaround_flag(struct ufs_qcom_host *host);
 static int ufs_qcom_get_pwr_dev_param(struct ufs_qcom_dev_params *qcom_param,
 				      struct ufs_pa_layer_attr *dev_max,
 				      struct ufs_pa_layer_attr *agreed_pwr)
@@ -184,6 +185,19 @@ static int ufs_qcom_get_connected_tx_lanes(struct ufs_hba *hba, u32 *tx_lanes)
 			UIC_ARG_MIB(PA_CONNECTEDTXDATALANES), tx_lanes);
 	if (err)
 		dev_err(hba->dev, "%s: couldn't read PA_CONNECTEDTXDATALANES %d\n",
+				__func__, err);
+
+	return err;
+}
+
+static int ufs_qcom_get_connected_rx_lanes(struct ufs_hba *hba, u32 *rx_lanes)
+{
+	int err = 0;
+
+	err = ufshcd_dme_get(hba,
+			UIC_ARG_MIB(PA_CONNECTEDRXDATALANES), rx_lanes);
+	if (err)
+		dev_err(hba->dev, "%s: couldn't read PA_CONNECTEDRXDATALANES %d\n",
 				__func__, err);
 
 	return err;
@@ -591,6 +605,36 @@ out:
 	return err;
 }
 
+static void ufs_qcom_force_mem_config(struct ufs_hba *hba)
+{
+	struct ufs_clk_info *clki;
+
+	/*
+	 * Configure the behavior of ufs clocks core and peripheral
+	 * memory state when they are turned off.
+	 * This configuration is required to allow retaining
+	 * ICE crypto configuration (including keys) when
+	 * core_clk_ice is turned off, and powering down
+	 * non-ICE RAMs of host controller.
+	 *
+	 * This is applicable only to gcc clocks.
+	 */
+	list_for_each_entry(clki, &hba->clk_list_head, list) {
+
+		/* skip it for non-gcc (rpmh) clocks */
+		if (!strcmp(clki->name, "ref_clk"))
+			continue;
+
+		if (!strcmp(clki->name, "core_clk_ice") ||
+			!strcmp(clki->name, "core_clk_ice_hw_ctl"))
+			qcom_clk_set_flags(clki->clk, CLKFLAG_RETAIN_MEM);
+		else
+			qcom_clk_set_flags(clki->clk, CLKFLAG_NORETAIN_MEM);
+		qcom_clk_set_flags(clki->clk, CLKFLAG_NORETAIN_PERIPH);
+		qcom_clk_set_flags(clki->clk, CLKFLAG_PERIPH_OFF_CLEAR);
+	}
+}
+
 static int ufs_qcom_hce_enable_notify(struct ufs_hba *hba,
 				      enum ufs_notify_change_status status)
 {
@@ -599,6 +643,7 @@ static int ufs_qcom_hce_enable_notify(struct ufs_hba *hba,
 
 	switch (status) {
 	case PRE_CHANGE:
+		ufs_qcom_force_mem_config(hba);
 		ufs_qcom_power_up_sequence(hba);
 		/*
 		 * The PHY PLL output is the source of tx/rx lane symbol
@@ -813,6 +858,117 @@ static int ufs_qcom_set_dme_vs_core_clk_ctrl_max_freq_mode(struct ufs_hba *hba)
 	return err;
 }
 
+/**
+ * ufs_qcom_bypass_cfgready_signal - Tunes PA_VS_CONFIG_REG1 and
+ * PA_VS_CONFIG_REG2 vendor specific attributes of local unipro
+ * to bypass CFGREADY signal on Config interface between UFS
+ * controller and PHY.
+ *
+ * The issue is related to config signals sampling from PHY
+ * to controller. The PHY signals which are driven by 150MHz
+ * clock and sampled by 300MHz instead of 150MHZ.
+ *
+ * The issue will be seen when only one of tx_cfg_rdyn_0
+ * and tx_cfg_rdyn_1 is 0 around sampling clock edge and
+ * if timing is not met as timing margin for some devices is
+ * very less in one of the corner.
+ *
+ * To workaround this issue, controller should bypass the Cfgready
+ * signal(TX_CFGREADY and RX_CFGREDY) because controller still wait
+ * for another signal tx_savestatusn which will serve same purpose.
+ *
+ * The corresponding HW CR: 'QCTDD06985523' UFS HSG4 test fails
+ * in SDF MAX GLS is linked to this issue.
+ */
+static int ufs_qcom_bypass_cfgready_signal(struct ufs_hba *hba)
+{
+	int err = 0;
+	u32 pa_vs_config_reg1;
+	u32 pa_vs_config_reg2;
+	u32 mask;
+
+	err = ufshcd_dme_get(hba, UIC_ARG_MIB(PA_VS_CONFIG_REG1),
+			&pa_vs_config_reg1);
+	if (err)
+		goto out;
+
+	err = ufshcd_dme_set(hba, UIC_ARG_MIB(PA_VS_CONFIG_REG1),
+			(pa_vs_config_reg1 | BIT_TX_EOB_COND));
+	if (err)
+		goto out;
+
+	err = ufshcd_dme_get(hba, UIC_ARG_MIB(PA_VS_CONFIG_REG2),
+			&pa_vs_config_reg2);
+	if (err)
+		goto out;
+
+	mask = (BIT_RX_EOB_COND | BIT_LINKCFG_WAIT_LL1_RX_CFG_RDY |
+					H8_ENTER_COND_MASK);
+	pa_vs_config_reg2 = (pa_vs_config_reg2 & ~mask) |
+				(0x2 << H8_ENTER_COND_OFFSET);
+
+	err = ufshcd_dme_set(hba, UIC_ARG_MIB(PA_VS_CONFIG_REG2),
+			(pa_vs_config_reg2));
+out:
+	return err;
+}
+
+static void ufs_qcom_dump_attribs(struct ufs_hba *hba)
+{
+	int ret;
+	int attrs[] = {0x15a0, 0x1552, 0x1553, 0x1554,
+		       0x1555, 0x1556, 0x1557, 0x155a,
+		       0x155b, 0x155c, 0x155d, 0x155e,
+		       0x155f, 0x1560, 0x1561, 0x1568,
+		       0x1569, 0x156a, 0x1571, 0x1580,
+		       0x1581, 0x1583, 0x1584, 0x1585,
+		       0x1586, 0x1587, 0x1590, 0x1591,
+		       0x15a1, 0x15a2, 0x15a3, 0x15a4,
+		       0x15a5, 0x15a6, 0x15a7, 0x15a8,
+		       0x15a9, 0x15aa, 0x15ab, 0x15c0,
+		       0x15c1, 0x15c2, 0x15d0, 0x15d1,
+		       0x15d2, 0x15d3, 0x15d4, 0x15d5,
+	};
+	int cnt = ARRAY_SIZE(attrs);
+	int i = 0, val;
+
+	for (; i < cnt; i++) {
+		ret = ufshcd_dme_get(hba, UIC_ARG_MIB(attrs[i]), &val);
+		if (ret) {
+			dev_err(hba->dev, "Failed reading: 0x%04x, ret:%d\n",
+				attrs[i], ret);
+			continue;
+		}
+		dev_err(hba->dev, "0x%04x: %d\n", attrs[i], val);
+	}
+}
+
+static void ufs_qcom_validate_link_params(struct ufs_hba *hba)
+{
+	int val = 0;
+	bool err = false;
+
+	WARN_ON(ufs_qcom_get_connected_tx_lanes(hba, &val));
+	if (val != hba->lanes_per_direction) {
+		dev_err(hba->dev, "%s: Tx lane mismatch [config,reported] [%d,%d]\n",
+			__func__, hba->lanes_per_direction, val);
+		WARN_ON(1);
+		err = true;
+	}
+
+	val = 0;
+	WARN_ON(ufs_qcom_get_connected_rx_lanes(hba, &val));
+	if (val != hba->lanes_per_direction) {
+		dev_err(hba->dev, "%s: Rx lane mismatch [config,reported] [%d,%d]\n",
+			__func__, hba->lanes_per_direction, val);
+		WARN_ON(1);
+		err = true;
+	}
+
+	if (err)
+		ufs_qcom_dump_attribs(hba);
+}
+
 static int ufs_qcom_link_startup_notify(struct ufs_hba *hba,
 					enum ufs_notify_change_status status)
 {
@@ -853,9 +1009,13 @@ static int ufs_qcom_link_startup_notify(struct ufs_hba *hba,
 			err = ufshcd_disable_host_tx_lcc(hba);
 		if (err)
 			goto out;
+
+		if (host->bypass_g4_cfgready)
+			err = ufs_qcom_bypass_cfgready_signal(hba);
 		break;
 	case POST_CHANGE:
 		ufs_qcom_link_startup_post_change(hba);
+		ufs_qcom_validate_link_params(hba);
 		break;
 	default:
 		break;
@@ -1620,6 +1780,29 @@ static void ufshcd_parse_pm_levels(struct ufs_hba *hba)
 		hba->spm_lvl = spm_lvl;
 }
 
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+static void ufs_qcom_override_pa_h8time(struct ufs_hba *hba)
+{
+	int ret;
+	u32 loc_tx_h8time_cap = 0;
+
+	ret = ufshcd_dme_get(hba, UIC_ARG_MIB_SEL(TX_HIBERN8TIME_CAPABILITY,
+				UIC_ARG_MPHY_TX_GEN_SEL_INDEX(0)),
+				&loc_tx_h8time_cap);
+	if (ret) {
+		dev_err(hba->dev, "Failed getting max h8 time: %d\n", ret);
+		return;
+	}
+
+	/* 1 implies 100 us */
+	ret = ufshcd_dme_set(hba, UIC_ARG_MIB(PA_HIBERN8TIME),
+				loc_tx_h8time_cap + 1);
+	if (ret)
+		dev_err(hba->dev, "Failed updating PA_HIBERN8TIME: %d\n", ret);
+
+}
+#endif
+
 static int ufs_qcom_apply_dev_quirks(struct ufs_hba *hba)
 {
 	unsigned long flags;
@@ -1628,8 +1811,8 @@ static int ufs_qcom_apply_dev_quirks(struct ufs_hba *hba)
 	spin_lock_irqsave(hba->host->host_lock, flags);
 	/* Set the rpm auto suspend delay to 3s */
 	hba->host->hostt->rpm_autosuspend_delay = UFS_QCOM_AUTO_SUSPEND_DELAY;
-	/* Set the default auto-hiberate idle timer value to 1ms */
-	hba->ahit = FIELD_PREP(UFSHCI_AHIBERN8_TIMER_MASK, 1) |
+	/* Set the default auto-hiberate idle timer value to 10ms */
+	hba->ahit = FIELD_PREP(UFSHCI_AHIBERN8_TIMER_MASK, 10) |
 		    FIELD_PREP(UFSHCI_AHIBERN8_SCALE_MASK, 3);
 	/* Set the clock gating delay to performance mode */
 	hba->clk_gating.delay_ms = UFS_QCOM_CLK_GATING_DELAY_MS_PERF;
@@ -1646,6 +1829,10 @@ static int ufs_qcom_apply_dev_quirks(struct ufs_hba *hba)
 	if (hba->dev_info.wmanufacturerid == UFS_VENDOR_MICRON)
 		hba->dev_quirks |= UFS_DEVICE_QUIRK_DELAY_BEFORE_LPM;
 
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+	if (hba->dev_quirks & UFS_DEVICE_QUIRK_PA_HIBER8TIME)
+		ufs_qcom_override_pa_h8time(hba);
+#endif
 	return err;
 }
 
@@ -1744,7 +1931,7 @@ static int ufs_qcom_unvote_qos_all(struct ufs_hba *hba)
 	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
 	struct ufs_qcom_qos_req *ufs_qos_req = host->ufs_qos;
 	struct qos_cpu_group *qcg;
-	int err, i;
+	int err = 0, i;
 
 	if (!host->ufs_qos)
 		return 0;
@@ -2602,6 +2789,7 @@ static int ufs_qcom_init(struct ufs_hba *hba)
 
 	ufs_qcom_parse_pm_level(hba);
 	ufs_qcom_parse_limits(host);
+	ufs_qcom_parse_g4_workaround_flag(host);
 	ufs_qcom_parse_lpm(host);
 	if (host->disable_lpm)
 		pm_runtime_forbid(host->hba->dev);
@@ -3139,7 +3327,6 @@ static void ufs_qcom_dump_dbg_regs(struct ufs_hba *hba)
 	ufshcd_dump_regs(hba, REG_UFS_SYS1CLK_1US, 16 * 4,
 			 "HCI Vendor Specific Registers ");
 
-	/* sleep a bit intermittently as we are dumping too much data */
 	ufs_qcom_print_hw_debug_reg_all(hba, NULL, ufs_qcom_dump_regs_wrapper);
 
 	if (in_task()) {
@@ -3178,6 +3365,20 @@ static void ufs_qcom_parse_limits(struct ufs_qcom_host *host)
 	of_property_read_u32(np, "limit-rx-pwm-gear", &host->limit_rx_pwm_gear);
 	of_property_read_u32(np, "limit-rate", &host->limit_rate);
 	of_property_read_u32(np, "limit-phy-submode", &host->limit_phy_submode);
+}
+
+/*
+ * ufs_qcom_parse_g4_workaround_flag - read bypass-g4-cfgready entry from DT
+ */
+static void ufs_qcom_parse_g4_workaround_flag(struct ufs_qcom_host *host)
+{
+	struct device_node *np = host->hba->dev->of_node;
+	const char *str  = "bypass-g4-cfgready";
+
+	if (!np)
+		return;
+
+	host->bypass_g4_cfgready = of_property_read_bool(np, str);
 }
 
 /*
@@ -3241,6 +3442,22 @@ static void ufs_qcom_config_scaling_param(struct ufs_hba *hba,
 }
 #endif
 
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+static struct ufs_dev_fix ufs_qcom_dev_fixups[] = {
+	UFS_FIX(UFS_VENDOR_MICRON, UFS_ANY_MODEL,
+		UFS_DEVICE_QUIRK_DELAY_BEFORE_LPM),
+	UFS_FIX(UFS_VENDOR_SKHYNIX, UFS_ANY_MODEL,
+		UFS_DEVICE_QUIRK_DELAY_BEFORE_LPM),
+	UFS_FIX(UFS_VENDOR_WDC, UFS_ANY_MODEL,
+		UFS_DEVICE_QUIRK_HOST_PA_TACTIVATE),
+	END_FIX
+};
+
+static void ufs_qcom_fixup_dev_quirks(struct ufs_hba *hba)
+{
+	ufshcd_fixup_dev_quirks(hba, ufs_qcom_dev_fixups);
+}
+#endif
 /**
  * struct ufs_hba_qcom_vops - UFS QCOM specific variant operations
  *
@@ -3264,6 +3481,9 @@ static const struct ufs_hba_variant_ops ufs_hba_qcom_vops = {
 	.device_reset		= ufs_qcom_device_reset,
 	.config_scaling_param = ufs_qcom_config_scaling_param,
 	.setup_xfer_req         = ufs_qcom_qos,
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+	.fixup_dev_quirks       = ufs_qcom_fixup_dev_quirks,
+#endif
 };
 
 /**

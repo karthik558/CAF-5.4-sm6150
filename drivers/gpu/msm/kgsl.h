@@ -31,7 +31,6 @@
 #define KGSL_DRAWOBJ_END_OF_FRAME      KGSL_CMDBATCH_END_OF_FRAME
 #define KGSL_DRAWOBJ_SYNC              KGSL_CMDBATCH_SYNC
 #define KGSL_DRAWOBJ_PWR_CONSTRAINT    KGSL_CMDBATCH_PWR_CONSTRAINT
-#define KGSL_DRAWOBJ_SPARSE            KGSL_CMDBATCH_SPARSE
 
 #define kgsl_drawobj_profiling_buffer kgsl_cmdbatch_profiling_buffer
 
@@ -65,20 +64,12 @@
  * Used Data:
  * Offset: Length(bytes): What
  * 0x0: 4 * KGSL_PRIORITY_MAX_RB_LEVELS: RB0 RPTR
- * 0x10: 8 * KGSL_PRIORITY_MAX_RB_LEVELS: RB0 CTXT RESTORE ADDR
  */
 
 /* Shadow global helpers */
 #define SCRATCH_RPTR_OFFSET(id) ((id) * sizeof(unsigned int))
 #define SCRATCH_RPTR_GPU_ADDR(dev, id) \
 	((dev)->scratch->gpuaddr + SCRATCH_RPTR_OFFSET(id))
-
-#define SCRATCH_PREEMPTION_CTXT_RESTORE_ADDR_OFFSET(id) \
-	(SCRATCH_RPTR_OFFSET(KGSL_PRIORITY_MAX_RB_LEVELS) + \
-	((id) * sizeof(uint64_t)))
-#define SCRATCH_PREEMPTION_CTXT_RESTORE_GPU_ADDR(dev, id) \
-	((dev)->scratch->gpuaddr + \
-	SCRATCH_PREEMPTION_CTXT_RESTORE_ADDR_OFFSET(id))
 
 /* Timestamp window used to detect rollovers (half of integer range) */
 #define KGSL_TIMESTAMP_WINDOW 0x80000000
@@ -98,7 +89,6 @@ static inline void KGSL_STATS_ADD(uint64_t size, atomic_long_t *stat,
 
 #define KGSL_MAX_NUMIBS 100000
 #define KGSL_MAX_SYNCPOINTS 32
-#define KGSL_MAX_SPARSE 1000
 
 struct kgsl_device;
 struct kgsl_context;
@@ -205,7 +195,6 @@ struct kgsl_memdesc_ops {
  * @attrs: dma attributes for this memory
  * @pages: An array of pointers to allocated pages
  * @page_count: Total number of pages allocated
- * @cur_bindings: Number of sparse pages actively bound
  */
 struct kgsl_memdesc {
 	struct kgsl_pagetable *pagetable;
@@ -224,7 +213,6 @@ struct kgsl_memdesc {
 	unsigned long attrs;
 	struct page **pages;
 	unsigned int page_count;
-	unsigned int cur_bindings;
 };
 
 /**
@@ -265,8 +253,6 @@ struct kgsl_global_memdesc {
  * @dev_priv: back pointer to the device file that created this entry.
  * @metadata: String containing user specified metadata for the entry
  * @work: Work struct used to schedule a kgsl_mem_entry_put in atomic contexts
- * @bind_lock: Lock for sparse memory bindings
- * @bind_tree: RB Tree for sparse memory bindings
  */
 struct kgsl_mem_entry {
 	struct kref refcount;
@@ -278,8 +264,11 @@ struct kgsl_mem_entry {
 	int pending_free;
 	char metadata[KGSL_GPUOBJ_ALLOC_METADATA_MAX + 1];
 	struct work_struct work;
-	spinlock_t bind_lock;
-	struct rb_root bind_tree;
+	/**
+	 * @mapped: The number of bytes in this entry that are mapped to
+	 * userspace
+	 */
+	u64 mapped;
 };
 
 struct kgsl_device_private;
@@ -340,21 +329,45 @@ struct kgsl_event_group {
 };
 
 /**
- * struct sparse_bind_object - Bind metadata
- * @node: Node for the rb tree
- * @p_memdesc: Physical memdesc bound to
- * @v_off: Offset of bind in the virtual entry
- * @p_off: Offset of bind in the physical memdesc
- * @size: Size of the bind
- * @flags: Flags for the bind
+ * struct submission_info - Container for submission statistics
+ * @inflight: Number of commands that are inflight
+ * @rb_id: id of the ringbuffer to which this submission is made
+ * @rptr: Read pointer of the ringbuffer
+ * @wptr: Write pointer of the ringbuffer
+ * @gmu_dispatch_queue: GMU dispach queue to which this submission is made
  */
-struct sparse_bind_object {
-	struct rb_node node;
-	struct kgsl_memdesc *p_memdesc;
-	uint64_t v_off;
-	uint64_t p_off;
-	uint64_t size;
-	uint64_t flags;
+struct submission_info {
+	int inflight;
+	u32 rb_id;
+	u32 rptr;
+	u32 wptr;
+	u32 gmu_dispatch_queue;
+};
+
+/**
+ * struct retire_info - Container for retire statistics
+ * @inflight: NUmber of commands that are inflight
+ * @rb_id: id of the ringbuffer to which this submission is made
+ * @rptr: Read pointer of the ringbuffer
+ * @wptr: Write pointer of the ringbuffer
+ * @gmu_dispatch_queue: GMU dispach queue to which this submission is made
+ * @timestamp: Timestamp of submission that retired
+ * @submitted_to_rb: AO ticks when GMU put this submission on ringbuffer
+ * @sop: AO ticks when GPU started procssing this submission
+ * @eop: AO ticks when GPU finished this submission
+ * @retired_on_gmu: AO ticks when GMU retired this submission
+ */
+struct retire_info {
+	int inflight;
+	int rb_id;
+	u32 rptr;
+	u32 wptr;
+	u32 gmu_dispatch_queue;
+	u32 timestamp;
+	u64 submitted_to_rb;
+	u64 sop;
+	u64 eop;
+	u64 retired_on_gmu;
 };
 
 long kgsl_ioctl_device_getproperty(struct kgsl_device_private *dev_priv,
@@ -412,21 +425,6 @@ long kgsl_ioctl_gpu_command(struct kgsl_device_private *dev_priv,
 				unsigned int cmd, void *data);
 long kgsl_ioctl_gpuobj_set_info(struct kgsl_device_private *dev_priv,
 				unsigned int cmd, void *data);
-
-long kgsl_ioctl_sparse_phys_alloc(struct kgsl_device_private *dev_priv,
-					unsigned int cmd, void *data);
-long kgsl_ioctl_sparse_phys_free(struct kgsl_device_private *dev_priv,
-					unsigned int cmd, void *data);
-long kgsl_ioctl_sparse_virt_alloc(struct kgsl_device_private *dev_priv,
-					unsigned int cmd, void *data);
-long kgsl_ioctl_sparse_virt_free(struct kgsl_device_private *dev_priv,
-					unsigned int cmd, void *data);
-long kgsl_ioctl_sparse_bind(struct kgsl_device_private *dev_priv,
-					unsigned int cmd, void *data);
-long kgsl_ioctl_sparse_unbind(struct kgsl_device_private *dev_priv,
-					unsigned int cmd, void *data);
-long kgsl_ioctl_gpu_sparse_command(struct kgsl_device_private *dev_priv,
-					unsigned int cmd, void *data);
 
 void kgsl_mem_entry_destroy(struct kref *kref);
 

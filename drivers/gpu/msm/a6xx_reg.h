@@ -119,7 +119,19 @@
 #define A6XX_VSC_ADDR_MODE_CNTL          0xC01
 
 /* LPAC registers */
+#define A6XX_CP_LPAC_DRAW_STATE_ADDR     0xB0A
+#define A6XX_CP_LPAC_DRAW_STATE_DATA     0xB0B
+#define A6XX_CP_LPAC_ROQ_DBG_ADDR        0xB0C
+#define A6XX_CP_SQE_AC_UCODE_DBG_ADDR    0xB27
+#define A6XX_CP_SQE_AC_UCODE_DBG_DATA    0xB28
+#define A6XX_CP_SQE_AC_STAT_ADDR         0xB29
+#define A6XX_CP_SQE_AC_STAT_DATA         0xB2A
+#define A6XX_CP_LPAC_ROQ_THRESHOLDS_1    0xB32
+#define A6XX_CP_LPAC_ROQ_THRESHOLDS_2    0xB33
 #define A6XX_CP_LPAC_PROG_FIFO_SIZE      0xB34
+#define A6XX_CP_LPAC_ROQ_DBG_DATA        0xB35
+#define A6XX_CP_LPAC_FIFO_DBG_DATA       0xB36
+#define A6XX_CP_LPAC_FIFO_DBG_ADDR       0xB40
 
 /* RBBM registers */
 #define A6XX_RBBM_INT_0_STATUS                   0x201
@@ -1027,6 +1039,7 @@
 
 /* FAL10 veto register */
 #define A6XX_GPU_GMU_CX_GMU_CX_FAL_INTF         0x1F8F0
+#define A6XX_GPU_GMU_CX_GMU_CX_FALNEXT_INTF     0x1F8F1
 
 #define A6XX_GMU_AO_INTERRUPT_EN		0x23B03
 #define A6XX_GMU_AO_HOST_INTERRUPT_CLR		0x23B04
@@ -1062,6 +1075,8 @@
 #define A6XX_GPU_CC_GX_DOMAIN_MISC             0x24542
 #define A6XX_GPU_CC_GX_DOMAIN_MISC3            0x24563
 
+/* GPU CPR registers */
+#define A6XX_GPU_CPR_FSM_CTL			0x26801
 
 /* GPU RSC sequencer registers */
 #define A6XX_GPU_RSCC_RSC_STATUS0_DRV0			0x00004
@@ -1123,7 +1138,7 @@
  * now we are using a separate section for RSCC regsiters. Add the
  * offset for backward compatibility.
  */
-#define RSCC_OFFSET_LEGACY			0x23000
+#define RSCC_OFFSET_LEGACY			0x23400
 
 /* RGMU(PCC) registers in A6X_GMU_CX_0_NON_CONTEXT_DEC domain */
 #define A6XX_RGMU_CX_INTR_GEN_EN		0x1F80F

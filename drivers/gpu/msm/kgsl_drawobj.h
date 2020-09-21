@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  */
 
 #ifndef __KGSL_DRAWOBJ_H
@@ -13,13 +13,10 @@
 	container_of(obj, struct kgsl_drawobj_sync, base)
 #define CMDOBJ(obj) \
 	container_of(obj, struct kgsl_drawobj_cmd, base)
-#define SPARSEOBJ(obj) \
-	container_of(obj, struct kgsl_drawobj_sparse, base)
 
 #define CMDOBJ_TYPE     BIT(0)
 #define MARKEROBJ_TYPE  BIT(1)
 #define SYNCOBJ_TYPE    BIT(2)
-#define SPARSEOBJ_TYPE  BIT(3)
 
 /**
  * struct kgsl_drawobj - KGSL drawobj descriptor
@@ -134,22 +131,6 @@ struct kgsl_drawobj_sync_event {
 	struct event_fence_info info;
 };
 
-/**
- * struct kgsl_drawobj_sparse - KGSl sparse obj descriptor
- * @base: Base kgsl_obj, this needs to be the first entry
- * @id: virtual id of the bind/unbind
- * @sparselist: list of binds/unbinds
- * @size: Size of kgsl_sparse_bind_object
- * @count: Number of elements in list
- */
-struct kgsl_drawobj_sparse {
-	struct kgsl_drawobj base;
-	unsigned int id;
-	struct list_head sparselist;
-	unsigned int size;
-	unsigned int count;
-};
-
 #define KGSL_DRAWOBJ_FLAGS \
 	{ KGSL_DRAWOBJ_MARKER, "MARKER" }, \
 	{ KGSL_DRAWOBJ_CTX_SWITCH, "CTX_SWITCH" }, \
@@ -165,6 +146,7 @@ struct kgsl_drawobj_sparse {
  *           command obj
  * @CMDOBJ_WFI - Force wait-for-idle for the submission
  * @CMDOBJ_PROFILE - store the start / retire ticks for
+ * @CMDOBJ_FAULT - Mark the command object as faulted
  * the command obj in the profiling buffer
  */
 enum kgsl_drawobj_cmd_priv {
@@ -172,6 +154,7 @@ enum kgsl_drawobj_cmd_priv {
 	CMDOBJ_FORCE_PREAMBLE,
 	CMDOBJ_WFI,
 	CMDOBJ_PROFILE,
+	CMDOBJ_FAULT,
 };
 
 struct kgsl_ibdesc;
@@ -202,12 +185,6 @@ int kgsl_drawobj_sync_add_synclist(struct kgsl_device *device,
 int kgsl_drawobj_sync_add_sync(struct kgsl_device *device,
 		struct kgsl_drawobj_sync *syncobj,
 		struct kgsl_cmd_syncpoint *sync);
-struct kgsl_drawobj_sparse *kgsl_drawobj_sparse_create(
-		struct kgsl_device *device,
-		struct kgsl_context *context, unsigned int flags);
-int kgsl_drawobj_sparse_add_sparselist(struct kgsl_device *device,
-		struct kgsl_drawobj_sparse *sparseobj, unsigned int id,
-		void __user *ptr, unsigned int size, unsigned int count);
 
 int kgsl_drawobjs_cache_init(void);
 void kgsl_drawobjs_cache_exit(void);

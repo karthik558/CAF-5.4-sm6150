@@ -12,7 +12,6 @@
 
 #define WLFW_SERVICE_INS_ID_V01		1
 #define WLFW_CLIENT_ID			0x4b4e454c
-#define MAX_BDF_FILE_NAME		13
 #define BDF_FILE_NAME_PREFIX		"bdwlan"
 #define ELF_BDF_FILE_NAME		"bdwlan.elf"
 #define ELF_BDF_FILE_NAME_PREFIX	"bdwlan.e"
@@ -452,6 +451,10 @@ int cnss_wlfw_tgt_cap_send_sync(struct cnss_plat_data *plat_priv)
 	if (resp->otp_version_valid)
 		plat_priv->otp_version = resp->otp_version;
 
+	if (resp->fw_caps_valid)
+		plat_priv->fw_pcie_gen_switch =
+			!!(resp->fw_caps & QMI_WLFW_HOST_PCIE_GEN_SWITCH_V01);
+
 	cnss_pr_dbg("Target capability: chip_id: 0x%x, chip_family: 0x%x, board_id: 0x%x, soc_id: 0x%x, fw_version: 0x%x, fw_build_timestamp: %s, fw_build_id: %s, otp_version: 0x%x\n",
 		    plat_priv->chip_info.chip_id,
 		    plat_priv->chip_info.chip_family,
@@ -476,42 +479,43 @@ static int cnss_get_bdf_file_name(struct cnss_plat_data *plat_priv,
 				  u32 bdf_type, char *filename,
 				  u32 filename_len)
 {
+	char filename_tmp[MAX_FIRMWARE_NAME_LEN];
 	int ret = 0;
 
 	switch (bdf_type) {
 	case CNSS_BDF_ELF:
 		if (plat_priv->board_info.board_id == 0xFF)
-			snprintf(filename, filename_len, ELF_BDF_FILE_NAME);
+			snprintf(filename_tmp, filename_len, ELF_BDF_FILE_NAME);
 		else if (plat_priv->board_info.board_id < 0xFF)
-			snprintf(filename, filename_len,
+			snprintf(filename_tmp, filename_len,
 				 ELF_BDF_FILE_NAME_PREFIX "%02x",
 				 plat_priv->board_info.board_id);
 		else
-			snprintf(filename, filename_len,
+			snprintf(filename_tmp, filename_len,
 				 BDF_FILE_NAME_PREFIX "%02x.e%02x",
 				 plat_priv->board_info.board_id >> 8 & 0xFF,
 				 plat_priv->board_info.board_id & 0xFF);
 		break;
 	case CNSS_BDF_BIN:
 		if (plat_priv->board_info.board_id == 0xFF)
-			snprintf(filename, filename_len, BIN_BDF_FILE_NAME);
+			snprintf(filename_tmp, filename_len, BIN_BDF_FILE_NAME);
 		else if (plat_priv->board_info.board_id < 0xFF)
-			snprintf(filename, filename_len,
+			snprintf(filename_tmp, filename_len,
 				 BIN_BDF_FILE_NAME_PREFIX "%02x",
 				 plat_priv->board_info.board_id);
 		else
-			snprintf(filename, filename_len,
+			snprintf(filename_tmp, filename_len,
 				 BDF_FILE_NAME_PREFIX "%02x.b%02x",
 				 plat_priv->board_info.board_id >> 8 & 0xFF,
 				 plat_priv->board_info.board_id & 0xFF);
 		break;
 	case CNSS_BDF_REGDB:
-		snprintf(filename, filename_len, REGDB_FILE_NAME);
+		snprintf(filename_tmp, filename_len, REGDB_FILE_NAME);
 		break;
 	case CNSS_BDF_DUMMY:
 		cnss_pr_dbg("CNSS_BDF_DUMMY is set, sending dummy BDF\n");
-		snprintf(filename, filename_len, DUMMY_BDF_FILE_NAME);
-		ret = MAX_BDF_FILE_NAME;
+		snprintf(filename_tmp, filename_len, DUMMY_BDF_FILE_NAME);
+		ret = MAX_FIRMWARE_NAME_LEN;
 		break;
 	default:
 		cnss_pr_err("Invalid BDF type: %d\n",
@@ -519,6 +523,10 @@ static int cnss_get_bdf_file_name(struct cnss_plat_data *plat_priv,
 		ret = -EINVAL;
 		break;
 	}
+
+	if (ret >= 0)
+		cnss_bus_add_fw_prefix_name(plat_priv, filename, filename_tmp);
+
 	return ret;
 }
 
@@ -528,7 +536,7 @@ int cnss_wlfw_bdf_dnld_send_sync(struct cnss_plat_data *plat_priv,
 	struct wlfw_bdf_download_req_msg_v01 *req;
 	struct wlfw_bdf_download_resp_msg_v01 *resp;
 	struct qmi_txn txn;
-	char filename[MAX_BDF_FILE_NAME];
+	char filename[MAX_FIRMWARE_NAME_LEN];
 	const struct firmware *fw_entry = NULL;
 	const u8 *temp;
 	unsigned int remaining;
@@ -551,7 +559,7 @@ int cnss_wlfw_bdf_dnld_send_sync(struct cnss_plat_data *plat_priv,
 				     filename, sizeof(filename));
 	if (ret > 0) {
 		temp = DUMMY_BDF_FILE_NAME;
-		remaining = MAX_BDF_FILE_NAME;
+		remaining = MAX_FIRMWARE_NAME_LEN;
 		goto bypass_bdf;
 	} else if (ret < 0) {
 		goto err_req_fw;
@@ -632,6 +640,12 @@ bypass_bdf:
 	if (bdf_type != CNSS_BDF_DUMMY)
 		release_firmware(fw_entry);
 
+	/* QCA6490 enable S3E regulator for IPA configuration only */
+	if (resp->host_bdf_data_valid) {
+		if (!(resp->host_bdf_data & QMI_WLFW_HW_XPA_V01))
+			cnss_enable_int_pow_amp_vreg(plat_priv);
+	}
+
 	kfree(req);
 	kfree(resp);
 	return 0;
@@ -640,7 +654,9 @@ err_send:
 	if (bdf_type != CNSS_BDF_DUMMY)
 		release_firmware(fw_entry);
 err_req_fw:
-	if (bdf_type != CNSS_BDF_REGDB)
+	if (!(bdf_type == CNSS_BDF_REGDB ||
+	      test_bit(CNSS_IN_REBOOT, &plat_priv->driver_state) ||
+	      ret == -EAGAIN))
 		CNSS_ASSERT(0);
 	kfree(req);
 	kfree(resp);
@@ -1281,6 +1297,64 @@ out:
 	return ret;
 }
 
+int cnss_wlfw_send_pcie_gen_speed_sync(struct cnss_plat_data *plat_priv)
+{
+	struct wlfw_pcie_gen_switch_req_msg_v01 req;
+	struct wlfw_pcie_gen_switch_resp_msg_v01 resp;
+	struct qmi_txn txn;
+	int ret = 0;
+
+	if (!plat_priv)
+		return -ENODEV;
+
+	if (plat_priv->pcie_gen_speed == QMI_PCIE_GEN_SPEED_INVALID_V01 ||
+	    !plat_priv->fw_pcie_gen_switch) {
+		cnss_pr_dbg("PCIE Gen speed not setup\n");
+		return 0;
+	}
+
+	cnss_pr_dbg("Sending PCIE Gen speed: %d state: 0x%lx\n",
+		    plat_priv->pcie_gen_speed, plat_priv->driver_state);
+	req.pcie_speed = (enum wlfw_pcie_gen_speed_v01)
+			plat_priv->pcie_gen_speed;
+
+	ret = qmi_txn_init(&plat_priv->qmi_wlfw, &txn,
+			   wlfw_pcie_gen_switch_resp_msg_v01_ei, &resp);
+	if (ret < 0) {
+		cnss_pr_err("Failed to initialize txn for PCIE speed switch err: %d\n",
+			    ret);
+		goto out;
+	}
+
+	ret = qmi_send_request(&plat_priv->qmi_wlfw, NULL, &txn,
+			       QMI_WLFW_PCIE_GEN_SWITCH_REQ_V01,
+			       WLFW_PCIE_GEN_SWITCH_REQ_MSG_V01_MAX_MSG_LEN,
+			       wlfw_pcie_gen_switch_req_msg_v01_ei, &req);
+	if (ret < 0) {
+		qmi_txn_cancel(&txn);
+		cnss_pr_err("Failed to send PCIE speed switch, err: %d\n", ret);
+		goto out;
+	}
+
+	ret = qmi_txn_wait(&txn, QMI_WLFW_TIMEOUT_JF);
+	if (ret < 0) {
+		cnss_pr_err("Failed to wait for PCIE Gen switch resp, err: %d\n",
+			    ret);
+		goto out;
+	}
+
+	if (resp.resp.result != QMI_RESULT_SUCCESS_V01) {
+		cnss_pr_err("PCIE Gen Switch req failed, Speed: %d, result: %d, err: %d\n",
+			    plat_priv->pcie_gen_speed, resp.resp.result,
+			    resp.resp.error);
+		ret = -resp.resp.result;
+	}
+out:
+	/* Reset PCIE Gen speed after one time use */
+	plat_priv->pcie_gen_speed = QMI_PCIE_GEN_SPEED_INVALID_V01;
+	return ret;
+}
+
 int cnss_wlfw_antenna_switch_send_sync(struct cnss_plat_data *plat_priv)
 {
 	struct wlfw_antenna_switch_req_msg_v01 *req;
@@ -1507,6 +1581,10 @@ static int cnss_wlfw_wfc_call_status_send_sync
 	struct qmi_txn txn;
 	int ret = 0;
 
+	if (!test_bit(CNSS_FW_READY, &plat_priv->driver_state)) {
+		cnss_pr_err("Drop IMS WFC indication as FW not initialized\n");
+		return -EINVAL;
+	}
 	req = kzalloc(sizeof(*req), GFP_KERNEL);
 	if (!req)
 		return -ENOMEM;
@@ -2026,6 +2104,11 @@ static int cnss_ims_wfc_call_twt_cfg_send_sync
 	struct ims_private_service_wfc_call_twt_config_rsp_msg_v01 *resp;
 	struct qmi_txn txn;
 	int ret = 0;
+
+	if (!test_bit(CNSS_IMS_CONNECTED, &plat_priv->driver_state)) {
+		cnss_pr_err("Drop FW WFC indication as IMS QMI not connected\n");
+		return -EINVAL;
+	}
 
 	req = kzalloc(sizeof(*req), GFP_KERNEL);
 	if (!req)

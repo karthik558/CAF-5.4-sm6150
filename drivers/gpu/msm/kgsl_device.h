@@ -25,7 +25,8 @@
  * past its timer) and all system resources are released.  SUSPEND is	*
  * requested by the kernel and will be enforced upon all open devices.	*
  * RESET indicates that GPU or GMU hang happens. KGSL is handling	*
- * snapshot or recover GPU from hang.					*
+ * snapshot or recover GPU from hang. MINBW implies that DDR BW vote is	*
+ * set to non-zero minimum value.
  */
 
 #define KGSL_STATE_NONE		0x00000000
@@ -35,6 +36,7 @@
 #define KGSL_STATE_SUSPEND	0x00000010
 #define KGSL_STATE_AWARE	0x00000020
 #define KGSL_STATE_SLUMBER	0x00000080
+#define KGSL_STATE_MINBW	0x00000100
 
 /**
  * enum kgsl_event_results - result codes passed to an event callback when the
@@ -49,7 +51,6 @@ enum kgsl_event_results {
 };
 
 #define KGSL_FLAG_WAKE_ON_TOUCH BIT(0)
-#define KGSL_FLAG_SPARSE        BIT(1)
 
 /*
  * "list" of event types for ftrace symbolic magic
@@ -68,8 +69,7 @@ enum kgsl_event_results {
 	{ KGSL_CONTEXT_SAVE_GMEM, "SAVE_GMEM" }, \
 	{ KGSL_CONTEXT_IFH_NOP, "IFH_NOP" }, \
 	{ KGSL_CONTEXT_SECURE, "SECURE" }, \
-	{ KGSL_CONTEXT_NO_SNAPSHOT, "NO_SNAPSHOT" }, \
-	{ KGSL_CONTEXT_SPARSE, "SPARSE" }
+	{ KGSL_CONTEXT_NO_SNAPSHOT, "NO_SNAPSHOT" }
 
 #define KGSL_CONTEXT_ID(_context) \
 	((_context != NULL) ? (_context)->id : KGSL_MEMSTORE_GLOBAL)
@@ -204,18 +204,6 @@ struct kgsl_memobj_node {
 	uint64_t size;
 	unsigned long flags;
 	unsigned long priv;
-};
-
-/**
- * struct kgsl_sparseobj_node - Sparse object descriptor
- * @node: Local list node for the sparse cmdbatch
- * @virt_id: Virtual ID to bind/unbind
- * @obj:  struct kgsl_sparse_binding_object
- */
-struct kgsl_sparseobj_node {
-	struct list_head node;
-	unsigned int virt_id;
-	struct kgsl_sparse_binding_object obj;
 };
 
 struct kgsl_device {
@@ -372,6 +360,7 @@ struct kgsl_process_private;
  * across preemption
  * @total_fault_count: number of times gpu faulted in this context
  * @last_faulted_cmd_ts: last faulted command batch timestamp
+ * @gmu_registered: whether context is registered with gmu or not
  */
 struct kgsl_context {
 	struct kref refcount;
@@ -393,6 +382,12 @@ struct kgsl_context {
 	struct kgsl_mem_entry *user_ctxt_record;
 	unsigned int total_fault_count;
 	unsigned int last_faulted_cmd_ts;
+	bool gmu_registered;
+	/**
+	 * @gmu_dispatch_queue: dispatch queue id to which this context will be
+	 * submitted
+	 */
+	u32 gmu_dispatch_queue;
 };
 
 #define _context_comm(_c) \
@@ -596,6 +591,15 @@ static inline int kgsl_state_is_awake(struct kgsl_device *device)
 		return false;
 }
 
+static inline bool kgsl_state_is_nap_or_minbw(struct kgsl_device *device)
+{
+	if (device->state == KGSL_STATE_NAP ||
+		device->state == KGSL_STATE_MINBW)
+		return true;
+
+	return false;
+}
+
 int kgsl_readtimestamp(struct kgsl_device *device, void *priv,
 		enum kgsl_timestamp_type type, unsigned int *timestamp);
 
@@ -705,9 +709,6 @@ long kgsl_ioctl_copy_in(unsigned int kernel_cmd, unsigned int user_cmd,
 
 long kgsl_ioctl_copy_out(unsigned int kernel_cmd, unsigned int user_cmd,
 		unsigned long arg, unsigned char *ptr);
-
-void kgsl_sparse_bind(struct kgsl_process_private *private,
-		struct kgsl_drawobj_sparse *sparse);
 
 /**
  * kgsl_context_type - Return a symbolic string for the context type

@@ -11,8 +11,25 @@
 #include <linux/vmalloc.h>
 #include <linux/dma-noncoherent.h>
 
+#define CREATE_TRACE_POINTS
+#include "ion_trace.h"
 #include "ion_private.h"
-#define ION_SYSTEM_HEAP_ID BIT(25)
+
+static atomic_long_t total_heap_bytes;
+
+static void track_buffer_created(struct ion_buffer *buffer)
+{
+	long total = atomic_long_add_return(buffer->size, &total_heap_bytes);
+
+	trace_ion_stat(buffer->sg_table, buffer->size, total);
+}
+
+static void track_buffer_destroyed(struct ion_buffer *buffer)
+{
+	long total = atomic_long_sub_return(buffer->size, &total_heap_bytes);
+
+	trace_ion_stat(buffer->sg_table, -buffer->size, total);
+}
 
 /* this function should only be called while dev->lock is held */
 static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
@@ -66,6 +83,7 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 
 	INIT_LIST_HEAD(&buffer->attachments);
 	mutex_init(&buffer->lock);
+	track_buffer_created(buffer);
 	return buffer;
 
 err1:
@@ -122,17 +140,10 @@ struct ion_buffer *ion_buffer_alloc(struct ion_device *dev, size_t len,
 		return ERR_PTR(-EINVAL);
 	}
 
-	/*
-	 * Temporarily reroute generic system heap allocations to the MSM system
-	 * heap. Once clients have stopped using the generic system heap ID, we
-	 * can remove this.
-	 */
 	if (heap_id_mask & ION_HEAP_SYSTEM) {
 		get_task_comm(task_comm, current->group_leader);
-		pr_warn_ratelimited("%s: Rerouting allocation from generic sys heap to msm sys heap for %s-%d\n",
+		pr_warn_ratelimited("%s: Detected allocation from generic sys heap for task %s-%d\n",
 				    __func__, task_comm, current->tgid);
-		heap_id_mask &= ~ION_HEAP_SYSTEM;
-		heap_id_mask |= ION_SYSTEM_HEAP_ID;
 	}
 
 	/*
@@ -230,6 +241,7 @@ int ion_buffer_destroy(struct ion_device *dev, struct ion_buffer *buffer)
 	}
 
 	heap = buffer->heap;
+	track_buffer_destroyed(buffer);
 
 	if (heap->flags & ION_HEAP_FLAG_DEFER_FREE)
 		ion_heap_freelist_add(heap, buffer);
@@ -265,4 +277,9 @@ void ion_buffer_kmap_put(struct ion_buffer *buffer)
 		ion_heap_unmap_kernel(buffer->heap, buffer);
 		buffer->vaddr = NULL;
 	}
+}
+
+u64 ion_get_total_heap_bytes(void)
+{
+	return atomic_long_read(&total_heap_bytes);
 }

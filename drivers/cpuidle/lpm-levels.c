@@ -149,8 +149,7 @@ static int lpm_cpu_qos_notify(struct notifier_block *nb,
 	int cpu = nb - dev_pm_qos_nb;
 
 	preempt_disable();
-	if (cpu != smp_processor_id() && cpu_online(cpu) &&
-	    !check_cpu_isolated(cpu))
+	if (cpu != smp_processor_id() && cpu_online(cpu))
 		wake_up_if_idle(cpu);
 	preempt_enable();
 
@@ -225,15 +224,93 @@ static void update_debug_pc_event(enum debug_event event, uint32_t arg1,
 	spin_unlock(&debug_lock);
 }
 
+uint32_t us_to_ticks(uint64_t sleep_val)
+{
+	uint64_t sec, nsec;
+
+	sec = sleep_val;
+	do_div(sec, USEC_PER_SEC);
+
+	if (sec > 0) {
+		nsec = sleep_val - sec * USEC_PER_SEC;
+		sleep_val = sec * ARCH_TIMER_HZ;
+		if (nsec > 0) {
+			nsec = nsec * NSEC_PER_USEC;
+			do_div(nsec, NSEC_PER_SEC/ARCH_TIMER_HZ);
+		}
+		sleep_val = sleep_val + nsec;
+	} else {
+		sleep_val = sleep_val * ARCH_TIMER_HZ;
+		do_div(sleep_val, USEC_PER_SEC);
+	}
+	return sleep_val;
+}
+
+static uint32_t get_next_event(struct lpm_cpu *cpu)
+{
+	ktime_t next_event = KTIME_MAX;
+	unsigned int next_cpu;
+	struct cpumask cpu_lpm_mask;
+
+	cpumask_and(&cpu_lpm_mask, &cpu->related_cpus, cpu_online_mask);
+	if (cpumask_empty(&cpu_lpm_mask))
+		return 0;
+
+	for_each_cpu(next_cpu, &cpu_lpm_mask) {
+		ktime_t next_event_c = per_cpu(cpu_lpm, next_cpu)->next_hrtimer;
+
+		if (next_event > next_event_c)
+			next_event = next_event_c;
+	}
+
+	return ktime_to_us(ktime_sub(next_event, ktime_get()));
+}
+
+static void program_rimps_timer(struct lpm_cpu *cpu)
+{
+	uint32_t ctrl_val, next_event;
+	struct cpumask cpu_lpm_mask;
+	struct lpm_cluster *cl = cpu->parent;
+
+	if (!cpu->rimps_tmr_base)
+		return;
+
+	cpumask_and(&cpu_lpm_mask, &cl->num_children_in_sync,
+						&cpu->related_cpus);
+	if (!cpumask_equal(&cpu_lpm_mask, &cpu->related_cpus))
+		return;
+
+	next_event = get_next_event(cpu);
+	if (!next_event)
+		return;
+
+	next_event = us_to_ticks(next_event);
+	spin_lock(&cpu->cpu_lock);
+
+	/* RIMPS timer pending should be read before programming timeout val */
+	readl_relaxed(cpu->rimps_tmr_base + TIMER_PENDING);
+	ctrl_val = readl_relaxed(cpu->rimps_tmr_base + TIMER_CTRL);
+	writel_relaxed(ctrl_val & ~(TIMER_CONTROL_EN),
+				cpu->rimps_tmr_base + TIMER_CTRL);
+	writel_relaxed(next_event, cpu->rimps_tmr_base + TIMER_VAL);
+	writel_relaxed(ctrl_val | (TIMER_CONTROL_EN),
+				cpu->rimps_tmr_base + TIMER_CTRL);
+	/* Ensure the write is complete before returning. */
+	wmb();
+	spin_unlock(&cpu->cpu_lock);
+}
+
 #ifdef CONFIG_SMP
 static int lpm_dying_cpu(unsigned int cpu)
 {
 	struct lpm_cluster *cluster = per_cpu(cpu_lpm, cpu)->parent;
+	struct lpm_cpu *lpm_cpu = per_cpu(cpu_lpm, cpu);
 
 	update_debug_pc_event(CPU_HP_DYING, cpu,
 				cluster->num_children_in_sync.bits[0],
 				cluster->child_cpus.bits[0], false);
 	cluster_prepare(cluster, get_cpu_mask(cpu), NR_LPM_LEVELS, false, 0);
+	program_rimps_timer(lpm_cpu);
 	return 0;
 }
 
@@ -1373,6 +1450,9 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 	if (need_resched())
 		goto exit;
 
+	if (idx == cpu->nlevels - 1)
+		program_rimps_timer(cpu);
+
 	ret = psci_enter_sleep(cpu, idx, true);
 	success = (ret == 0);
 
@@ -1397,7 +1477,7 @@ exit:
 	return idx;
 }
 
-static void lpm_cpuidle_s2idle(struct cpuidle_device *dev,
+static int lpm_cpuidle_s2idle(struct cpuidle_device *dev,
 		struct cpuidle_driver *drv, int idx)
 {
 	struct lpm_cpu *cpu = per_cpu(cpu_lpm, dev->cpu);
@@ -1411,7 +1491,7 @@ static void lpm_cpuidle_s2idle(struct cpuidle_device *dev,
 	}
 	if (idx < 0) {
 		pr_err("Failed suspend\n");
-		return;
+		return -EPERM;
 	}
 
 	cpu_prepare(cpu, idx, true);
@@ -1422,6 +1502,7 @@ static void lpm_cpuidle_s2idle(struct cpuidle_device *dev,
 
 	cluster_unprepare(cpu->parent, cpumask, idx, false, 0, success);
 	cpu_unprepare(cpu, idx, true);
+	return 0;
 }
 
 #ifdef CONFIG_CPU_IDLE_MULTIPLE_DRIVERS
@@ -1681,8 +1762,6 @@ static int lpm_probe(struct platform_device *pdev)
 	 * core.  BUG in existing code but no known issues possibly because of
 	 * how late lpm_levels gets initialized.
 	 */
-	suspend_set_ops(&lpm_suspend_ops);
-	s2idle_set_ops(&lpm_s2idle_ops);
 	for_each_possible_cpu(cpu) {
 		cpu_histtimer = &per_cpu(histtimer, cpu);
 		hrtimer_init(cpu_histtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -1730,11 +1809,15 @@ static int lpm_probe(struct platform_device *pdev)
 		goto failed;
 	}
 
+	suspend_set_ops(&lpm_suspend_ops);
+	s2idle_set_ops(&lpm_s2idle_ops);
 
 	return 0;
 failed:
 	free_cluster_node(lpm_root_node);
 	lpm_root_node = NULL;
+	dma_free_coherent(&pdev->dev, size, lpm_debug, lpm_debug_phys);
+
 	return ret;
 }
 

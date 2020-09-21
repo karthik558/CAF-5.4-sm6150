@@ -40,6 +40,36 @@ DEFINE_EVENT(cpu, cpu_idle,
 	TP_ARGS(state, cpu_id)
 );
 
+#ifdef CONFIG_QGKI_MENU_GOV_DEBUG
+TRACE_EVENT(cpuidle_select,
+
+	TP_PROTO(int cpu, long residency, unsigned int latency, bool tick,
+		 int idx),
+
+	TP_ARGS(cpu, residency, latency, tick, idx),
+
+	TP_STRUCT__entry(
+			 __field(int,  cpu)
+			 __field(long, residency)
+			 __field(u32,  latency)
+			 __field(bool, tick)
+			 __field(int,  idx)
+	),
+
+	TP_fast_assign(
+		       __entry->cpu = cpu;
+		       __entry->residency = residency;
+		       __entry->latency = latency;
+		       __entry->tick = tick;
+		       __entry->idx = idx;
+	),
+
+	TP_printk("cpu: %d residency: %lld latency: %d tick: %d idx: %d",
+		  __entry->cpu, __entry->residency, __entry->latency,
+		  __entry->tick, __entry->idx)
+);
+#endif
+
 TRACE_EVENT(powernv_throttle,
 
 	TP_PROTO(int chip_id, const char *reason, int pmax),
@@ -670,9 +700,9 @@ TRACE_EVENT(memlat_dev_meas,
 
 	TP_PROTO(const char *name, unsigned int dev_id, unsigned long inst,
 		 unsigned long mem, unsigned long freq, unsigned int stall,
-		 unsigned int ratio),
+		 unsigned int wb, unsigned int ratio),
 
-	TP_ARGS(name, dev_id, inst, mem, freq, stall, ratio),
+	TP_ARGS(name, dev_id, inst, mem, freq, stall, wb, ratio),
 
 	TP_STRUCT__entry(
 		__string(name, name)
@@ -681,6 +711,7 @@ TRACE_EVENT(memlat_dev_meas,
 		__field(unsigned long, mem)
 		__field(unsigned long, freq)
 		__field(unsigned int, stall)
+		__field(unsigned int, wb)
 		__field(unsigned int, ratio)
 	),
 
@@ -691,16 +722,18 @@ TRACE_EVENT(memlat_dev_meas,
 		__entry->mem = mem;
 		__entry->freq = freq;
 		__entry->stall = stall;
+		__entry->wb = wb;
 		__entry->ratio = ratio;
 	),
 
-	TP_printk("dev: %s, id=%u, inst=%lu, mem=%lu, freq=%lu, stall=%u, ratio=%u",
+	TP_printk("dev: %s, id=%u, inst=%lu, mem=%lu, freq=%lu, stall=%u, wb=%u, ratio=%u",
 		__get_str(name),
 		__entry->dev_id,
 		__entry->inst,
 		__entry->mem,
 		__entry->freq,
 		__entry->stall,
+		__entry->wb,
 		__entry->ratio)
 );
 

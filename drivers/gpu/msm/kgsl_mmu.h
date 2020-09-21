@@ -93,16 +93,6 @@ struct kgsl_mmu_pt_ops {
 			uint64_t memflags);
 	bool (*addr_in_range)(struct kgsl_pagetable *pagetable,
 			uint64_t gpuaddr);
-	int (*mmu_map_offset)(struct kgsl_pagetable *pt,
-			uint64_t virtaddr, uint64_t virtoffset,
-			struct kgsl_memdesc *memdesc, uint64_t physoffset,
-			uint64_t size, uint64_t flags);
-	int (*mmu_unmap_offset)(struct kgsl_pagetable *pt,
-			struct kgsl_memdesc *memdesc, uint64_t addr,
-			uint64_t offset, uint64_t size);
-	int (*mmu_sparse_dummy_map)(struct kgsl_pagetable *pt,
-			struct kgsl_memdesc *memdesc, uint64_t offset,
-			uint64_t size);
 };
 
 enum kgsl_mmu_feature {
@@ -128,6 +118,12 @@ enum kgsl_mmu_feature {
 	KGSL_MMU_LLCC_ENABLE,
 	/** @KGSL_MMU_SMMU_APERTURE: Set the SMMU aperture */
 	KGSL_MMU_SMMU_APERTURE,
+	/** @KGSL_MMU_SPLIT_TABLES_GC: Split pagetables are enabled for GC */
+	KGSL_MMU_SPLIT_TABLES_GC,
+	/**
+	 * @KGSL_MMU_SPLIT_TABLES_LPAC: Split pagetables are enabled for LPAC
+	 */
+	KGSL_MMU_SPLIT_TABLES_LPAC,
 };
 
 /**
@@ -207,17 +203,6 @@ struct kgsl_pagetable *kgsl_get_pagetable(unsigned long name);
 
 struct kgsl_pagetable *
 kgsl_mmu_createpagetableobject(struct kgsl_mmu *mmu, unsigned int name);
-
-int kgsl_mmu_map_offset(struct kgsl_pagetable *pagetable,
-		uint64_t virtaddr, uint64_t virtoffset,
-		struct kgsl_memdesc *memdesc, uint64_t physoffset,
-		uint64_t size, uint64_t flags);
-int kgsl_mmu_unmap_offset(struct kgsl_pagetable *pagetable,
-		struct kgsl_memdesc *memdesc, uint64_t addr, uint64_t offset,
-		uint64_t size);
-
-int kgsl_mmu_sparse_dummy_map(struct kgsl_pagetable *pagetable,
-		struct kgsl_memdesc *memdesc, uint64_t offset, uint64_t size);
 
 /*
  * Static inline functions of MMU that simply call the SMMU specific

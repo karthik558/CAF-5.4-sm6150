@@ -54,6 +54,7 @@
 #define NUM_OF_ENCRYPTED_KEY	3
 
 static void __iomem *pil_info_base;
+static void __iomem *pil_disable_timeout_base;
 static struct md_global_toc *g_md_toc;
 
 /**
@@ -98,45 +99,6 @@ struct pil_seg {
 	int num;
 	struct list_head list;
 	bool relocated;
-};
-
-/**
- * struct pil_priv - Private state for a pil_desc
- * @proxy: work item used to run the proxy unvoting routine
- * @ws: wakeup source to prevent suspend during pil_boot
- * @wname: name of @ws
- * @desc: pointer to pil_desc this is private data for
- * @seg: list of segments sorted by physical address
- * @entry_addr: physical address where processor starts booting at
- * @base_addr: smallest start address among all segments that are relocatable
- * @region_start: address where relocatable region starts or lowest address
- * for non-relocatable images
- * @region_end: address where relocatable region ends or highest address for
- * non-relocatable images
- * @region: region allocated for relocatable images
- * @unvoted_flag: flag to keep track if we have unvoted or not.
- *
- * This struct contains data for a pil_desc that should not be exposed outside
- * of this file. This structure points to the descriptor and the descriptor
- * points to this structure so that PIL drivers can't access the private
- * data of a descriptor but this file can access both.
- */
-struct pil_priv {
-	struct delayed_work proxy;
-	struct wakeup_source *ws;
-	char wname[32];
-	struct pil_desc *desc;
-	int num_segs;
-	struct list_head segs;
-	phys_addr_t entry_addr;
-	phys_addr_t base_addr;
-	phys_addr_t region_start;
-	phys_addr_t region_end;
-	bool is_region_allocated;
-	struct pil_image_info __iomem *info;
-	int id;
-	int unvoted_flag;
-	size_t region_size;
 };
 
 /**
@@ -497,22 +459,13 @@ int pil_do_ramdump(struct pil_desc *desc,
 
 	s = ramdump_segs;
 	list_for_each_entry(seg, &priv->segs, list) {
-		s->v_address = ioremap_wc(seg->paddr, seg->sz);
-		if (!s->v_address)
-			goto ioremap_err;
-
+		s->address = seg->paddr;
 		s->size = seg->sz;
 		s++;
 		map_cnt++;
 	}
 
 	ret = do_elf_ramdump(ramdump_dev, ramdump_segs, count);
-
-	s = ramdump_segs;
-	list_for_each_entry(seg, &priv->segs, list) {
-		iounmap(s->v_address);
-		s++;
-	}
 
 	kfree(ramdump_segs);
 
@@ -525,17 +478,6 @@ int pil_do_ramdump(struct pil_desc *desc,
 				(priv->region_end - priv->region_start));
 
 	return ret;
-
-ioremap_err:
-	/* Undo all the previous mappings */
-	s = ramdump_segs;
-	while (map_cnt--) {
-		iounmap(s->v_address);
-		s++;
-	}
-
-	kfree(ramdump_segs);
-	return -ENOMEM;
 }
 EXPORT_SYMBOL(pil_do_ramdump);
 
@@ -1676,39 +1618,61 @@ static int pil_pm_notify(struct notifier_block *b, unsigned long event, void *p)
 static struct notifier_block pil_pm_notifier = {
 	.notifier_call = pil_pm_notify,
 };
-
-static int __init msm_pil_init(void)
+static void __iomem * __init pil_get_resource(const char *prop,
+					resource_size_t *out_size)
 {
+	void __iomem *base_addr;
 	struct device_node *np;
 	struct resource res;
+
+	np = of_find_compatible_node(NULL, NULL, prop);
+	if (!np) {
+		pr_warn("pil: failed to find %s node\n", prop);
+		return NULL;
+	}
+
+	if (of_address_to_resource(np, 0, &res)) {
+		pr_warn("pil: address to resource for %s failed\n", prop);
+		return NULL;
+	}
+
+	base_addr = ioremap(res.start, resource_size(&res));
+	if (!base_addr) {
+		pr_warn("pil: could not map region for %s\n", prop);
+		return NULL;
+	}
+
+	if (out_size)
+		*out_size = resource_size(&res);
+
+	return base_addr;
+}
+static int __init msm_pil_init(void)
+{
+	resource_size_t res_size;
 	int i;
 
-	np = of_find_compatible_node(NULL, NULL, "qcom,msm-imem-pil");
-	if (!np) {
-		pr_warn("pil: failed to find qcom,msm-imem-pil node\n");
-		goto out;
+	pil_info_base = pil_get_resource("qcom,msm-imem-pil", &res_size);
+	if (pil_info_base) {
+		for (i = 0; i < res_size / sizeof(u32); i++)
+			writel_relaxed(0, pil_info_base + (i * sizeof(u32)));
 	}
-	if (of_address_to_resource(np, 0, &res)) {
-		pr_warn("pil: address to resource on imem region failed\n");
-		goto out;
+
+	pil_disable_timeout_base =
+		pil_get_resource("qcom,msm-imem-pil-disable-timeout", NULL);
+	if (pil_disable_timeout_base) {
+		if (__raw_readl(pil_disable_timeout_base) == 0x53444247) {
+			pr_info("pil: pil-imem set to disable pil timeouts\n");
+			disable_timeouts = true;
+		}
+
+		iounmap(pil_disable_timeout_base);
 	}
-	pil_info_base = ioremap(res.start, resource_size(&res));
-	if (!pil_info_base) {
-		pr_warn("pil: could not map imem region\n");
-		goto out;
-	}
-	if (__raw_readl(pil_info_base) == 0x53444247) {
-		pr_info("pil: pil-imem set to disable pil timeouts\n");
-		disable_timeouts = true;
-	}
-	for (i = 0; i < resource_size(&res)/sizeof(u32); i++)
-		writel_relaxed(0, pil_info_base + (i * sizeof(u32)));
 
 	pil_wq = alloc_workqueue("pil_workqueue", WQ_HIGHPRI | WQ_UNBOUND, 0);
 	if (!pil_wq)
 		pr_warn("pil: Defaulting to sequential firmware loading.\n");
 
-out:
 	return register_pm_notifier(&pil_pm_notifier);
 }
 subsys_initcall(msm_pil_init);

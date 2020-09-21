@@ -105,6 +105,7 @@ struct walt_sched_stats {
 	int nr_big_tasks;
 	u64 cumulative_runnable_avg_scaled;
 	u64 pred_demands_sum_scaled;
+	unsigned int nr_rtg_high_prio_tasks;
 };
 
 struct walt_task_group {
@@ -2991,10 +2992,22 @@ static inline bool task_in_related_thread_group(struct task_struct *p)
 	return (rcu_access_pointer(p->wts.grp) != NULL);
 }
 
+static inline bool task_rtg_high_prio(struct task_struct *p)
+{
+	return task_in_related_thread_group(p) &&
+		(p->prio <= sysctl_walt_rtg_cfs_boost_prio);
+}
+
 static inline struct walt_related_thread_group
 *task_related_thread_group(struct task_struct *p)
 {
 	return rcu_dereference(p->wts.grp);
+}
+
+static inline bool walt_low_latency_task(struct task_struct *p)
+{
+	return p->wts.low_latency &&
+		(task_util(p) < sysctl_walt_low_latency_task_threshold);
 }
 
 /* Is frequency of two cpus synchronized with each other? */

@@ -10,6 +10,11 @@
 #include "fg-alg.h"
 #include "qg-defs.h"
 
+struct qg_config {
+	u32			qg_version;
+	u32			pmic_version;
+};
+
 struct qg_batt_props {
 	const char		*batt_type_str;
 	int			float_volt_uv;
@@ -59,6 +64,7 @@ struct qg_dt {
 	int			sys_min_volt_mv;
 	int			fvss_vbat_mv;
 	int			tcss_entry_soc;
+	int			esr_low_temp_threshold;
 	bool			hold_soc_while_full;
 	bool			linearize_soc;
 	bool			cl_disable;
@@ -66,6 +72,7 @@ struct qg_dt {
 	bool			esr_disable;
 	bool			esr_discharge_enable;
 	bool			qg_ext_sense;
+	bool			use_cp_iin_sns;
 	bool			use_s7_ocv;
 	bool			qg_sleep_config;
 	bool			qg_fast_chg_cfg;
@@ -86,11 +93,14 @@ struct qg_esr_data {
 
 struct qpnp_qg {
 	struct device		*dev;
-	struct pmic_revid_data	*pmic_rev_id;
 	struct regmap		*regmap;
 	struct qpnp_vadc_chip	*vadc_dev;
 	struct soh_profile      *sp;
 	struct power_supply	*qg_psy;
+	struct iio_dev		*indio_dev;
+	struct iio_chan_spec	*iio_chan;
+	struct iio_channel	*int_iio_chans;
+	struct iio_channel	**ext_iio_chans;
 	struct class		*qg_class;
 	struct device		*qg_device;
 	struct cdev		qg_cdev;
@@ -122,11 +132,13 @@ struct qpnp_qg {
 	struct power_supply	*usb_psy;
 	struct power_supply	*dc_psy;
 	struct power_supply	*parallel_psy;
+	struct power_supply	*cp_psy;
 	struct qg_esr_data	esr_data[QG_MAX_ESR_COUNT];
 
 	/* status variable */
 	u32			*debug_mask;
 	u32			qg_version;
+	u32			pmic_version;
 	bool			qg_device_open;
 	bool			profile_loaded;
 	bool			battery_missing;
@@ -261,6 +273,13 @@ enum qg_wa_flags {
 enum qg_version {
 	QG_PMIC5,
 	QG_LITE,
+};
+
+enum pmic_version {
+	PM2250,
+	PM6150,
+	PMI632,
+	PM7250B,
 };
 
 enum qg_mode {

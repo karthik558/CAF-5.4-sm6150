@@ -6,6 +6,7 @@
 #define pr_fmt(fmt)	"QG-K: %s: " fmt, __func__
 
 #include <linux/alarmtimer.h>
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/power_supply.h>
@@ -14,6 +15,7 @@
 #include "fg-alg.h"
 #include "qg-sdam.h"
 #include "qg-core.h"
+#include "qg-iio.h"
 #include "qg-reg.h"
 #include "qg-util.h"
 #include "qg-defs.h"
@@ -236,7 +238,7 @@ static int qg_process_tcss_soc(struct qpnp_qg *chip, int sys_soc)
 {
 	int rc, ibatt_diff = 0, ibat_inc_hyst = 0;
 	int qg_iterm_ua = (-1 * chip->dt.iterm_ma * 1000);
-	int soc_ibat, wt_ibat, wt_sys;
+	int soc_ibat, wt_ibat, wt_sys, val;
 	union power_supply_propval prop = {0, };
 
 	if (!chip->dt.tcss_enable && !(qg_ss_feature & QG_TCSS))
@@ -267,9 +269,8 @@ static int qg_process_tcss_soc(struct qpnp_qg *chip, int sys_soc)
 		chip->tcss_active = true;
 	}
 
-	rc = power_supply_get_property(chip->batt_psy,
-			POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED, &prop);
-	if (!rc && prop.intval) {
+	rc = qg_read_iio_chan(chip, INPUT_CURRENT_LIMITED, &val);
+	if (!rc && val) {
 		qg_dbg(chip, QG_DEBUG_SOC,
 			"Input limited sys_soc=%d soc_tcss=%d\n",
 					sys_soc, chip->soc_tcss);
@@ -332,14 +333,13 @@ skip_entry_count:
 static int qg_process_bass_soc(struct qpnp_qg *chip, int sys_soc)
 {
 	int bass_soc = sys_soc, msoc = chip->msoc;
-	int batt_soc = CAP(0, 100, DIV_ROUND_CLOSEST(chip->batt_soc, 100));
 
 	if (!chip->dt.bass_enable && !(qg_ss_feature & QG_BASS))
 		goto exit_soc_scale;
 
 	qg_dbg(chip, QG_DEBUG_SOC, "BASS Entry: fifo_i=%d sys_soc=%d msoc=%d batt_soc=%d fvss_active=%d\n",
 			chip->last_fifo_i_ua, sys_soc, msoc,
-			batt_soc, chip->fvss_active);
+			chip->batt_soc, chip->fvss_active);
 
 	/* Skip BASS if FVSS is active */
 	if (chip->fvss_active)
@@ -351,11 +351,11 @@ static int qg_process_bass_soc(struct qpnp_qg *chip, int sys_soc)
 
 	if (!chip->bass_active) {
 		chip->bass_active = true;
-		chip->bsoc_bass_entry = batt_soc;
+		chip->bsoc_bass_entry = chip->batt_soc;
 	}
 
 	/* Drop the sys_soc by 1% if batt_soc has dropped */
-	if ((chip->bsoc_bass_entry - batt_soc) >= 1) {
+	if ((chip->bsoc_bass_entry - chip->batt_soc) >= 100) {
 		bass_soc = (msoc > 0) ? msoc - 1 : 0;
 		chip->bass_active = false;
 	}

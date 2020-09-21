@@ -32,6 +32,7 @@
 #include <linux/posix-timers.h>
 #include <linux/rseq.h>
 #include <linux/android_kabi.h>
+#include <linux/android_vendor.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
@@ -117,18 +118,6 @@ struct task_group;
 #define task_contributes_to_load(task)	((task->state & TASK_UNINTERRUPTIBLE) != 0 && \
 					 (task->flags & PF_FROZEN) == 0 && \
 					 (task->state & TASK_NOLOAD) == 0)
-
-/*
- * Enum for display driver to provide varying refresh rates
- */
-enum fps {
-	FPS0 = 0,
-	FPS30 = 30,
-	FPS48 = 48,
-	FPS60 = 60,
-	FPS90 = 90,
-	FPS120 = 120,
-};
 
 enum task_boost_type {
 	TASK_BOOST_NONE = 0,
@@ -562,7 +551,6 @@ register_cpu_cycle_counter_cb(struct cpu_cycle_counter_cb *cb);
 extern void
 sched_update_cpu_freq_min_max(const cpumask_t *cpus, u32 fmin, u32 fmax);
 extern void free_task_load_ptrs(struct task_struct *p);
-extern void sched_set_refresh_rate(enum fps fps);
 extern int set_task_boost(int boost, u64 period);
 extern void walt_update_cluster_topology(void);
 
@@ -618,6 +606,7 @@ struct walt_task_struct {
 	int				boost;
 	bool				wake_up_idle;
 	bool				misfit;
+	bool				rtg_high_prio;
 	bool				low_latency;
 	u64				boost_period;
 	u64				boost_expires;
@@ -645,8 +634,6 @@ static inline void free_task_load_ptrs(struct task_struct *p) { }
 
 static inline void sched_update_cpu_freq_min_max(const cpumask_t *cpus,
 					u32 fmin, u32 fmax) { }
-
-static inline void sched_set_refresh_rate(enum fps fps) { }
 
 static inline void set_task_boost(int boost, u64 period) { }
 static inline void walt_update_cluster_topology(void) { }
@@ -1465,6 +1452,8 @@ struct task_struct {
 	unsigned long			lowest_stack;
 	unsigned long			prev_lowest_stack;
 #endif
+
+	ANDROID_VENDOR_DATA_ARRAY(1, 2);
 
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);

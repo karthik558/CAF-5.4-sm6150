@@ -15,6 +15,7 @@
 #include <linux/iommu.h>
 #include <linux/ioport.h>
 #include <linux/clk.h>
+#include <linux/clk/qcom.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/types.h>
@@ -40,6 +41,7 @@
 #include <linux/reset.h>
 #include <linux/usb/dwc3-msm.h>
 #include <linux/usb/role.h>
+#include <linux/usb/redriver.h>
 
 #include "core.h"
 #include "gadget.h"
@@ -399,7 +401,6 @@ struct dwc3_msm {
 	struct list_head req_complete_list;
 	struct clk		*xo_clk;
 	struct clk		*core_clk;
-	struct clk		*core_csr_clk;
 	long			core_clk_rate;
 	long			core_clk_rate_hs;
 	struct clk		*iface_clk;
@@ -483,6 +484,7 @@ struct dwc3_msm {
 
 	struct usb_role_switch *role_switch;
 	bool			ss_release_called;
+	int			orientation_override;
 };
 
 #define USB_HSPHY_3P3_VOL_MIN		3050000 /* uV */
@@ -656,7 +658,7 @@ static int dbm_get_num_of_eps_configured(struct dwc3_msm *mdwc)
 	int i;
 	int count = 0;
 
-	for (i = 0; i < mdwc->dbm_num_eps; i++)
+	for (i = 0; i < min(mdwc->dbm_num_eps, DBM_1_5_NUM_EP); i++)
 		if (mdwc->dbm_ep_num_mapping[i])
 			count++;
 
@@ -777,6 +779,7 @@ int msm_data_fifo_config(struct usb_ep *ep, unsigned long addr,
 
 	return 0;
 }
+EXPORT_SYMBOL(msm_data_fifo_config);
 
 static int dbm_ep_unconfig(struct dwc3_msm *mdwc, u8 usb_ep);
 
@@ -2185,14 +2188,9 @@ static int dwc3_msm_config_gdsc(struct dwc3_msm *mdwc, int on)
 			return ret;
 		}
 
-		ret = clk_prepare_enable(mdwc->core_csr_clk);
-		if (ret) {
-			regulator_disable(mdwc->dwc3_gdsc);
-			dev_err(mdwc->dev, "unable to enable core_csr_clks\n");
-			return ret;
-		}
+		qcom_clk_set_flags(mdwc->core_clk, CLKFLAG_RETAIN_MEM);
 	} else {
-		clk_disable_unprepare(mdwc->core_csr_clk);
+		qcom_clk_set_flags(mdwc->core_clk, CLKFLAG_NORETAIN_MEM);
 		ret = regulator_disable(mdwc->dwc3_gdsc);
 		if (ret) {
 			dev_err(mdwc->dev, "unable to disable usb3 gdsc\n");
@@ -2775,9 +2773,9 @@ static int dwc3_msm_update_bus_bw(struct dwc3_msm *mdwc, enum bus_vote bv)
 	 * set it to _NONE irrespective of the requested vote
 	 * from userspace.
 	 */
-	if (bv >= BUS_VOTE_MAX)
-		bv_index = mdwc->default_bus_vote;
-	else if (bv == BUS_VOTE_NONE)
+	if (bv_index >= BUS_VOTE_MAX)
+		bv_index = BUS_VOTE_MAX - 1;
+	else if (bv_index < BUS_VOTE_NONE)
 		bv_index = BUS_VOTE_NONE;
 
 	for (i = 0; i < ARRAY_SIZE(mdwc->icc_paths); i++) {
@@ -3069,9 +3067,11 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 	if (dwc->maximum_speed >= USB_SPEED_SUPER &&
 			mdwc->lpm_flags & MDWC3_SS_PHY_SUSPEND) {
 		mdwc->ss_phy->flags &= ~(PHY_LANE_A | PHY_LANE_B);
-		if (mdwc->typec_orientation == ORIENTATION_CC1)
+		if (mdwc->orientation_override)
+			mdwc->ss_phy->flags |= mdwc->orientation_override;
+		else if (mdwc->typec_orientation == ORIENTATION_CC1)
 			mdwc->ss_phy->flags |= PHY_LANE_A;
-		if (mdwc->typec_orientation == ORIENTATION_CC2)
+		else if (mdwc->typec_orientation == ORIENTATION_CC2)
 			mdwc->ss_phy->flags |= PHY_LANE_B;
 		usb_phy_set_suspend(mdwc->ss_phy, 0);
 		mdwc->ss_phy->flags &= ~DEVICE_IN_SS_MODE;
@@ -3452,10 +3452,6 @@ static int dwc3_msm_get_clk_gdsc(struct dwc3_msm *mdwc)
 		return ret;
 	}
 
-	mdwc->core_csr_clk = devm_clk_get(mdwc->dev, "core_csr_clk");
-	if (IS_ERR(mdwc->core_csr_clk))
-		mdwc->core_csr_clk = NULL;
-
 	mdwc->core_reset = devm_reset_control_get(mdwc->dev, "core_reset");
 	if (IS_ERR(mdwc->core_reset)) {
 		dev_err(mdwc->dev, "failed to get core_reset\n");
@@ -3743,6 +3739,36 @@ static struct usb_role_switch_desc role_desc = {
 	.allow_userspace_control = true,
 };
 
+static ssize_t orientation_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct dwc3_msm *mdwc = dev_get_drvdata(dev);
+
+	if (mdwc->orientation_override == PHY_LANE_A)
+		return scnprintf(buf, PAGE_SIZE, "A\n");
+	if (mdwc->orientation_override == PHY_LANE_B)
+		return scnprintf(buf, PAGE_SIZE, "B\n");
+
+	return scnprintf(buf, PAGE_SIZE, "none\n");
+}
+
+static ssize_t orientation_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct dwc3_msm *mdwc = dev_get_drvdata(dev);
+
+	if (sysfs_streq(buf, "A"))
+		mdwc->orientation_override = PHY_LANE_A;
+	else if (sysfs_streq(buf, "B"))
+		mdwc->orientation_override = PHY_LANE_B;
+	else
+		mdwc->orientation_override = ORIENTATION_NONE;
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(orientation);
+
 static ssize_t mode_show(struct device *dev, struct device_attribute *attr,
 		char *buf)
 {
@@ -3985,6 +4011,7 @@ int dwc3_msm_release_ss_lane(struct device *dev)
 {
 	struct dwc3_msm *mdwc = dev_get_drvdata(dev);
 	struct dwc3 *dwc = NULL;
+	struct device_node *ssusb_redriver_node;
 
 	if (mdwc == NULL) {
 		dev_err(dev, "dwc3-msm is not initialized yet.\n");
@@ -4001,6 +4028,10 @@ int dwc3_msm_release_ss_lane(struct device *dev)
 	/* flush any pending work */
 	flush_work(&mdwc->resume_work);
 	drain_workqueue(mdwc->sm_usb_wq);
+
+	ssusb_redriver_node =
+		of_parse_phandle(mdwc->dev->of_node, "ssusb_redriver", 0);
+	redriver_release_usb_lanes(ssusb_redriver_node);
 
 	mdwc->ss_release_called = true;
 	if (mdwc->id_state == DWC3_ID_GROUND) {
@@ -4386,6 +4417,7 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 		dwc3_ext_event_notify(mdwc);
 	}
 
+	device_create_file(&pdev->dev, &dev_attr_orientation);
 	device_create_file(&pdev->dev, &dev_attr_mode);
 	device_create_file(&pdev->dev, &dev_attr_speed);
 	device_create_file(&pdev->dev, &dev_attr_bus_vote);
@@ -5204,7 +5236,7 @@ static struct platform_driver dwc3_msm_driver = {
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("DesignWare USB3 MSM Glue Layer");
-MODULE_SOFTDEP("pre: phy-generic phy-msm-snps-hs phy-msm-ssusb-qmp");
+MODULE_SOFTDEP("pre: phy-generic phy-msm-snps-hs phy-msm-ssusb-qmp eud");
 
 static int dwc3_msm_init(void)
 {
