@@ -87,6 +87,13 @@ enum mon_type {
 	MAX_MEMLAT_DEVICE_TYPE
 };
 
+enum pmu_cache_status {
+	PMU_CACHE_INVALID,
+	PMU_CACHE_VALID,
+	PMU_MAP_INVALID,
+	PMU_CACHE_STATUS_MAX
+};
+
 struct core_dev_map {
 	u32 core_mhz;
 	u32 target_freq;
@@ -620,7 +627,8 @@ static void save_cpugrp_pmu_events(struct memlat_cpu_grp *cpu_grp, u8 cpu)
 	for (i = 0; i < NUM_COMMON_EVS; i++) {
 		u8 hw_id = pmu[i].hw_cntr_idx;
 
-		if (hw_id == INVALID_PMU_HW_IDX)
+		if ((hw_id == INVALID_PMU_HW_IDX) ||
+				!cpus_data->common_evs[i])
 			continue;
 		perf_event_read_local(cpus_data->common_evs[i],
 				&ev_count, NULL, NULL);
@@ -639,7 +647,8 @@ static void save_mon_pmu_events(struct memlat_mon *mon, u8 cpu)
 	for (i = 0; i < NUM_MON_EVS; i++) {
 		u8 hw_id = pmu[i].hw_cntr_idx;
 
-		if (hw_id == INVALID_PMU_HW_IDX)
+		if (hw_id == INVALID_PMU_HW_IDX ||
+				!ev_data->mon_evs[i])
 			continue;
 		perf_event_read_local(ev_data->mon_evs[i],
 				&ev_count, NULL, NULL);
@@ -658,6 +667,7 @@ static void free_common_evs(struct memlat_cpu_grp *cpu_grp, cpumask_t *mask)
 			if (!cpus_data->common_evs[i])
 				continue;
 			perf_event_release_kernel(cpus_data->common_evs[i]);
+			cpus_data->common_evs[i] = NULL;
 		}
 	}
 }
@@ -674,6 +684,7 @@ static void free_mon_evs(struct memlat_mon *mon, cpumask_t *mask)
 				continue;
 
 			perf_event_release_kernel(ev_data->mon_evs[i]);
+			ev_data->mon_evs[i] = NULL;
 		}
 	}
 }
@@ -697,6 +708,9 @@ static int memlat_hp_restart_events(unsigned int cpu, bool cpu_up)
 	ops = cpu_grp->handle->memlat_ops;
 
 	cpumask_set_cpu(cpu, &mask);
+
+	if (cpu_up)
+		set_pmu_cache_flag(PMU_MAP_INVALID, cpu);
 
 	if (cpu_up) {
 		ret = setup_common_pmu_events(cpu_grp, &mask);
@@ -747,7 +761,7 @@ static int memlat_hp_restart_events(unsigned int cpu, bool cpu_up)
 			free_mon_evs(mon, &mask);
 		}
 	}
-	set_pmu_cache_flag(!cpu_up, cpu);
+	set_pmu_cache_flag(cpu_up ? PMU_CACHE_INVALID : PMU_CACHE_VALID, cpu);
 exit:
 	kfree(attr);
 	return ret;
@@ -755,8 +769,12 @@ exit:
 
 static int memlat_event_hotplug_coming_up(unsigned int cpu)
 {
-	per_cpu(cpu_is_hp, cpu) = false;
-	return memlat_hp_restart_events(cpu, true);
+	int ret;
+
+	ret = memlat_hp_restart_events(cpu, true);
+	if (!ret)
+		per_cpu(cpu_is_hp, cpu) = false;
+	return ret;
 }
 
 static int memlat_event_hotplug_going_down(unsigned int cpu)
@@ -805,12 +823,12 @@ static int memlat_idle_notif(struct notifier_block *nb,
 				mon = &cpu_grp->mons[i];
 				save_mon_pmu_events(mon, cpu);
 			}
-			set_pmu_cache_flag(true, cpu);
+			set_pmu_cache_flag(PMU_CACHE_VALID, cpu);
 		}
 		break;
 	case CPU_PM_EXIT:
 		__this_cpu_write(cpu_is_idle, false);
-		set_pmu_cache_flag(false, cpu);
+		set_pmu_cache_flag(PMU_CACHE_INVALID, cpu);
 		break;
 	}
 idle_exit:
@@ -1255,10 +1273,13 @@ static int memlat_cpu_grp_probe(struct platform_device *pdev)
 	}
 
 	if (!rimps_kobj) {
-		rimps_kobj = kobject_create();
-		if (!rimps_kobj)
+		rimps_kobj = kzalloc(sizeof(*rimps_kobj), GFP_KERNEL);
+
+		if (!rimps_kobj) {
 			dev_err(dev, "%s: failed to create rimps_kobj\n",
 						__func__);
+			return -ENOMEM;
+		}
 
 		ret = kobject_init_and_add(rimps_kobj, &ktype_log_level,
 				   &cpu_subsys.dev_root->kobj, "memlat");
