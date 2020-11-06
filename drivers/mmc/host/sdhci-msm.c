@@ -23,6 +23,7 @@
 
 #include "sdhci-pltfm.h"
 #include "cqhci.h"
+#include "cqhci-crypto-qti.h"
 #if defined(CONFIG_SDC_QTI)
 #include "../core/core.h"
 #endif
@@ -128,6 +129,7 @@
 #define FINE_TUNE_MODE_EN		BIT(27)
 #define BIAS_OK_SIGNAL			BIT(29)
 #define DLL_CONFIG_3_POR_VAL		0x10
+#define DLL_CONFIG_POR_VAL		0x6007642C
 
 
 #define INVALID_TUNING_PHASE	-1
@@ -307,6 +309,10 @@ struct sdhci_msm_dll_hsr {
 	u32 ddr_config;
 };
 
+struct cqe_regs_restore {
+	u32 cqe_vendor_cfg1;
+};
+
 struct sdhci_msm_regs_restore {
 	bool is_supported;
 	bool is_valid;
@@ -442,6 +448,7 @@ struct sdhci_msm_host {
 	bool use_7nm_dll;
 	struct sdhci_msm_dll_hsr *dll_hsr;
 	struct sdhci_msm_regs_restore regs_restore;
+	struct cqe_regs_restore cqe_regs;
 	u32 *sup_ice_clk_table;
 	unsigned char sup_ice_clk_cnt;
 	u32 ice_clk_max;
@@ -885,7 +892,7 @@ static int msm_init_cm_dll(struct sdhci_host *host,
 	else
 		ddr_cfg_offset = msm_offset->core_ddr_config_old;
 
-	if (msm_host->dll_hsr->ddr_config)
+	if (msm_host->dll_hsr && msm_host->dll_hsr->ddr_config)
 		writel_relaxed(msm_host->dll_hsr->ddr_config, host->ioaddr +
 			ddr_cfg_offset);
 	else
@@ -924,16 +931,14 @@ static int msm_init_cm_dll(struct sdhci_host *host,
 		udelay(5);
 	}
 
-	/*
-	 * Step 10 - Update the lower two bytes of DLL_CONFIG only with
-	 * HSR values. Since these are the static settings.
-	 */
-	if (msm_host->dll_hsr) {
-		writel_relaxed((readl_relaxed(host->ioaddr +
-			msm_offset->core_dll_config) |
-			(msm_host->dll_hsr->dll_config & 0xffff)),
-			host->ioaddr + msm_offset->core_dll_config);
-	}
+	/* Step 10 - Config DLL_CONFIG with HSR values */
+	if (msm_host->dll_hsr && msm_host->dll_hsr->dll_config)
+		writel_relaxed(msm_host->dll_hsr->dll_config |
+			CORE_DLL_RST | CORE_DLL_PDN, host->ioaddr +
+			msm_offset->core_dll_config);
+	else
+		writel_relaxed(DLL_CONFIG_POR_VAL, host->ioaddr +
+			msm_offset->core_dll_config);
 
 	/* Step 11 - Wait for 52us */
 	spin_unlock_irqrestore(&host->lock, flags);
@@ -970,27 +975,22 @@ static int msm_init_cm_dll(struct sdhci_host *host,
 				msm_offset->core_dll_config_2);
 	}
 
-	/* Step 16 - Set DLL_EN bit to 1. */
-	writel_relaxed((readl_relaxed(host->ioaddr +
-			msm_offset->core_dll_config) | CORE_DLL_EN),
-			host->ioaddr + msm_offset->core_dll_config);
-
 	/*
-	 * Step 17 - Wait for 8000 input clock. Here we calculate the
+	 * Step 16 - Wait for 8000 input clock. Here we calculate the
 	 * delay from fixed clock freq 192MHz, which turns out 42us.
 	 */
 	spin_unlock_irqrestore(&host->lock, flags);
 	usleep_range(45, 50);
 	spin_lock_irqsave(&host->lock, flags);
 
-	/* Step 18 - Set CK_OUT_EN bit to 1. */
+	/* Step 17 - Set CK_OUT_EN bit to 1. */
 	writel_relaxed((readl_relaxed(host->ioaddr +
 			msm_offset->core_dll_config)
 			| CORE_CK_OUT_EN), host->ioaddr +
 			msm_offset->core_dll_config);
 
 	/*
-	 * Step 19 - Wait until DLL_LOCK bit of DLL_STATUS register
+	 * Step 18 - Wait until DLL_LOCK bit of DLL_STATUS register
 	 * becomes '1'.
 	 */
 	while (!(readl_relaxed(host->ioaddr + msm_offset->core_dll_status) &
@@ -1008,7 +1008,7 @@ static int msm_init_cm_dll(struct sdhci_host *host,
 
 out:
 	if (core_vendor_spec & CORE_CLK_PWRSAVE) {
-		/* Step 20 - Reenable PWRSAVE as needed */
+		/* Step 19 - Reenable PWRSAVE as needed */
 		writel_relaxed((readl_relaxed(host->ioaddr +
 			msm_offset->core_vendor_spec)
 			| CORE_CLK_PWRSAVE), host->ioaddr +
@@ -1268,7 +1268,7 @@ static int sdhci_msm_cm_dll_sdc4_calibration(struct sdhci_host *host)
 	else
 		ddr_cfg_offset = msm_offset->core_ddr_config_old;
 
-	if (msm_host->dll_hsr->ddr_config)
+	if (msm_host->dll_hsr && msm_host->dll_hsr->ddr_config)
 		config = msm_host->dll_hsr->ddr_config;
 	else
 		config = DDR_CONFIG_POR_VAL;
@@ -2030,7 +2030,7 @@ static int sdhci_msm_vreg_enable(struct sdhci_msm_reg_data *vreg)
 
 	if (!vreg->is_enabled) {
 		/* Set voltage level */
-		ret = sdhci_msm_vreg_set_voltage(vreg, vreg->high_vol_level,
+		ret = sdhci_msm_vreg_set_voltage(vreg, vreg->low_vol_level,
 						vreg->high_vol_level);
 		if (ret)
 			return ret;
@@ -2452,6 +2452,7 @@ static void sdhci_msm_registers_save(struct sdhci_host *host)
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
 	struct sdhci_msm_host *msm_host = sdhci_pltfm_priv(pltfm_host);
 	const struct sdhci_msm_offset *msm_offset = msm_host->offset;
+	struct cqhci_host *cq_host = host->mmc->cqe_private;
 
 	if (!msm_host->regs_restore.is_supported &&
 			!msm_host->reg_store)
@@ -2500,6 +2501,9 @@ static void sdhci_msm_registers_save(struct sdhci_host *host)
 		msm_offset->core_dll_config_3);
 	msm_host->regs_restore.dll_usr_ctl = readl_relaxed(host->ioaddr +
 		msm_offset->core_dll_usr_ctl);
+	if (cq_host)
+		msm_host->cqe_regs.cqe_vendor_cfg1 =
+			cqhci_readl(cq_host, CQHCI_VENDOR_CFG1);
 
 	msm_host->regs_restore.is_valid = true;
 
@@ -2516,6 +2520,7 @@ static void sdhci_msm_registers_restore(struct sdhci_host *host)
 	const struct sdhci_msm_offset *msm_offset = msm_host->offset;
 	u32 irq_status;
 	struct mmc_ios ios = host->mmc->ios;
+	struct cqhci_host *cq_host = host->mmc->cqe_private;
 
 	if ((!msm_host->regs_restore.is_supported ||
 		!msm_host->regs_restore.is_valid) &&
@@ -2568,6 +2573,10 @@ static void sdhci_msm_registers_restore(struct sdhci_host *host)
 			host->ioaddr + msm_offset->core_pwrctl_ctl);
 	writel_relaxed(msm_host->regs_restore.vendor_pwrctl_mask,
 			host->ioaddr + msm_offset->core_pwrctl_mask);
+
+	if (cq_host)
+		cqhci_writel(cq_host, msm_host->cqe_regs.cqe_vendor_cfg1,
+				CQHCI_VENDOR_CFG1);
 
 	if (((ios.timing == MMC_TIMING_MMC_HS400) ||
 			(ios.timing == MMC_TIMING_MMC_HS200) ||
@@ -3089,6 +3098,14 @@ static int sdhci_msm_cqe_add_host(struct sdhci_host *host,
 
 	dma64 = host->flags & SDHCI_USE_64_BIT_DMA;
 
+	/*
+	 * Set the vendor specific ops needed for ICE.
+	 * Default implementation if the ops are not set.
+	 */
+#ifdef CONFIG_MMC_CQHCI_CRYPTO_QTI
+	cqhci_crypto_qti_set_vops(cq_host);
+#endif
+
 	ret = cqhci_init(cq_host, host->mmc, dma64);
 	if (ret) {
 		dev_err(&pdev->dev, "%s: CQE init: failed (%d)\n",
@@ -3131,7 +3148,6 @@ static void sdhci_msm_reset(struct sdhci_host *host, u8 mask)
 		cqhci_deactivate(host->mmc);
 	sdhci_reset(host, mask);
 }
-
 
 #define MAX_TEST_BUS 60
 #define DRIVER_NAME "sdhci_msm"
@@ -3254,6 +3270,31 @@ static void sdhci_msm_dump_vendor_regs(struct sdhci_host *host)
 				debug_reg[i+2], debug_reg[i+3]);
 }
 
+static int sdhci_msm_notify_load(struct sdhci_host *host, enum mmc_load state)
+{
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_msm_host *msm_host = sdhci_pltfm_priv(pltfm_host);
+	int ret = 0;
+	u32 clk_rate = 0;
+
+	if (!IS_ERR(msm_host->bulk_clks[2].clk)) {
+		clk_rate = (state == MMC_LOAD_LOW) ?
+			msm_host->ice_clk_min :
+			msm_host->ice_clk_max;
+		if (msm_host->ice_clk_rate == clk_rate)
+			return 0;
+		pr_debug("%s: changing ICE clk rate to %u\n",
+				mmc_hostname(host->mmc), clk_rate);
+		ret = clk_set_rate(msm_host->bulk_clks[2].clk, clk_rate);
+		if (ret) {
+			pr_err("%s: ICE_CLK rate set failed (%d) for %u\n",
+				mmc_hostname(host->mmc), ret, clk_rate);
+			return ret;
+		}
+		msm_host->ice_clk_rate = clk_rate;
+	}
+	return 0;
+}
 #endif
 
 static const struct sdhci_msm_variant_ops mci_var_ops = {
@@ -3360,6 +3401,7 @@ static const struct sdhci_ops sdhci_msm_ops = {
 	.irq	= sdhci_msm_cqe_irq,
 #if defined(CONFIG_SDC_QTI)
 	.get_current_limit = sdhci_msm_get_current_limit,
+	.notify_load = sdhci_msm_notify_load,
 #endif
 	.hw_reset = sdhci_msm_hw_reset,
 };

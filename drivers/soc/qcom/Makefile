@@ -40,6 +40,7 @@ obj-$(CONFIG_QCOM_RUN_QUEUE_STATS) += rq_stats.o
 obj-$(CONFIG_QCOM_APR) += apr.o
 obj-$(CONFIG_QCOM_LLCC) += llcc-slice.o
 obj-$(CONFIG_QCOM_LAHAINA_LLCC) += llcc-lahaina.o
+obj-$(CONFIG_QCOM_SDXLEMUR_LLCC) += llcc-sdxlemur.o
 obj-$(CONFIG_QCOM_SHIMA_LLCC) += llcc-shima.o
 obj-$(CONFIG_QCOM_MINIDUMP) += msm_minidump.o minidump_log.o
 obj-$(CONFIG_QCOM_MEM_OFFLINE) += mem-offline.o
@@ -93,6 +94,8 @@ obj-$(CONFIG_MSM_RPM_SMD)   +=  rpm-smd-debug.o
 endif
 obj-$(CONFIG_QTI_SYS_PM_VX) += sys_pm_vx.o
 obj-$(CONFIG_ICNSS2) += icnss2/
+obj-$(CONFIG_QTI_PLH_SCMI_CLIENT) += plh_scmi.o
 obj-$(CONFIG_QTI_HW_MEMLAT_SCMI_CLIENT)	+= memlat_scmi.o
 obj-$(CONFIG_QTI_HW_MEMLAT) += rimps_memlat.o
 obj-$(CONFIG_QTI_HW_MEMLAT_LOG)	+= rimps_log.o
+obj-$(CONFIG_QCOM_QFPROM_SYS) += qfprom-sys.o

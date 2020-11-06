@@ -37,6 +37,7 @@
 #define INST_EV 0x08 /* 0th event*/
 #define CYC_EV 0x11 /* 1st event*/
 #define INIT "Init"
+#define CPU_CYCLE_THRESHOLD 650000
 static DEFINE_PER_CPU(bool, cpu_is_idle);
 static DEFINE_PER_CPU(bool, cpu_is_hp);
 static DEFINE_MUTEX(perfevent_lock);
@@ -106,7 +107,6 @@ static bool max_cap_cpus[NR_CPUS];
 static cpumask_var_t limit_mask_min;
 static cpumask_var_t limit_mask_max;
 
-static atomic_t game_status;
 static atomic_t game_status_pid;
 
 static bool ready_for_freq_updates;
@@ -589,7 +589,7 @@ static int get_cpu_total_instruction(char *buf, const struct kernel_param *kp)
 		cycles = pmu_events[CYC_EVENT][cpu].cur_delta;
 		/* collecting max inst and ipc for max cap and min cap cpus */
 		if (max_cap_cpus[cpu]) {
-			if (cycles)
+			if (cycles && cycles >= CPU_CYCLE_THRESHOLD)
 				ipc_big = max(ipc_big,
 						((instruction*100)/cycles));
 			total_inst_big += instruction;
@@ -884,8 +884,7 @@ void  msm_perf_events_update(enum evt_update_t update_typ,
 	if (update_typ != MSM_PERF_GFX)
 		return;
 
-	if (!atomic_read(&game_status) ||
-	(pid != atomic_read(&game_status_pid)))
+	if (pid != atomic_read(&game_status_pid) || (timestamp == 0))
 		return;
 
 	spin_lock_irqsave(&gfx_circ_buff_lock, flags);
@@ -902,30 +901,6 @@ void  msm_perf_events_update(enum evt_update_t update_typ,
 		complete(&gfx_evt_arrival);
 }
 
-
-
-static int set_game_start_event(const char *buf, const struct kernel_param *kp)
-{
-	long usr_val = 0;
-	int ret = strlen(buf);
-
-	kstrtol(buf, 0, &usr_val);
-	atomic_set(&game_status, usr_val);
-	return ret;
-}
-
-static int get_game_start_event(char *buf, const struct kernel_param *kp)
-{
-	long usr_val  = atomic_read(&game_status);
-
-	return scnprintf(buf, PAGE_SIZE, "%ld\n", usr_val);
-}
-
-static const struct kernel_param_ops param_ops_game_start_evt = {
-	.set = set_game_start_event,
-	.get = get_game_start_event,
-};
-module_param_cb(evnt_gplaf_status, &param_ops_game_start_evt, NULL, 0644);
 
 static int set_game_start_pid(const char *buf, const struct kernel_param *kp)
 {
