@@ -98,6 +98,8 @@ struct ssusb_redriver {
 	u8	loss_match[CHAN_MODE_NUM][CHANNEL_NUM];
 	u8	flat_gain[CHAN_MODE_NUM][CHANNEL_NUM];
 
+	u8	gen_dev_val;
+
 	struct dentry	*debug_root;
 };
 
@@ -187,6 +189,8 @@ static void ssusb_redriver_gen_dev_set(struct ssusb_redriver *redriver)
 		val &= ~CHIP_EN;
 		break;
 	}
+
+	redriver->gen_dev_val = val;
 
 	redriver_i2c_reg_set(redriver, GEN_DEV_SET_REG, val);
 }
@@ -455,13 +459,20 @@ static int ssusb_redriver_ucsi_notifier(struct notifier_block *nb,
 	struct ucsi_glink_constat_info *info = data;
 	enum operation_mode op_mode;
 
-	/*
-	 * when connect a DP only cable,
-	 * ucsi set usb flag first, then set usb and alternate mode
-	 * after dp start link training.
-	 * it should only set alternate_mode flag ???
-	 */
-	if (info->partner_usb && info->partner_alternate_mode) {
+	if (info->connect && !info->partner_change)
+		return NOTIFY_DONE;
+
+	if (!info->connect) {
+		if (info->partner_usb || info->partner_alternate_mode)
+			dev_err(redriver->dev, "set partner when no connection\n");
+		op_mode = OP_MODE_NONE;
+	} else if (info->partner_usb && info->partner_alternate_mode) {
+		/*
+		 * when connect a DP only cable,
+		 * ucsi set usb flag first, then set usb and alternate mode
+		 * after dp start link training.
+		 * it should only set alternate_mode flag ???
+		 */
 		if (redriver->op_mode == OP_MODE_DP)
 			return NOTIFY_OK;
 		op_mode = OP_MODE_USB_AND_DP;
@@ -469,10 +480,9 @@ static int ssusb_redriver_ucsi_notifier(struct notifier_block *nb,
 		if (redriver->op_mode == OP_MODE_DP)
 			return NOTIFY_OK;
 		op_mode = OP_MODE_USB;
-	}
-	else if (info->partner_alternate_mode)
+	} else if (info->partner_alternate_mode) {
 		op_mode = OP_MODE_DP;
-	else
+	} else
 		op_mode = OP_MODE_NONE;
 
 	if (redriver->op_mode == op_mode)
@@ -523,6 +533,41 @@ int redriver_release_usb_lanes(struct device_node *node)
 	return 0;
 }
 EXPORT_SYMBOL(redriver_release_usb_lanes);
+
+/* NOTE: DO NOT change mode in this funciton */
+int redriver_gadget_pullup(struct device_node *node, int is_on)
+{
+	struct ssusb_redriver *redriver;
+	struct i2c_client *client;
+	u8 val;
+
+	if (!node)
+		return -EINVAL;
+
+	client = of_find_i2c_device_by_node(node);
+	if (!client)
+		return -EINVAL;
+
+	redriver = i2c_get_clientdata(client);
+
+	/*
+	 * when redriver connect to a USB hub, and do adb root operation,
+	 * due to redriver rx termination detection issue,
+	 * hub will not detct device logical removal.
+	 * workaround to temp disable/enable redriver when usb pullup operation.
+	 */
+	if (redriver->op_mode != OP_MODE_USB)
+		return 0;
+
+	val = redriver->gen_dev_val;
+	if (!is_on)
+		val &= ~CHIP_EN;
+
+	redriver_i2c_reg_set(redriver, GEN_DEV_SET_REG, val);
+
+	return 0;
+}
+EXPORT_SYMBOL(redriver_gadget_pullup);
 
 static void ssusb_redriver_orientation_gpio_init(
 		struct ssusb_redriver *redriver)

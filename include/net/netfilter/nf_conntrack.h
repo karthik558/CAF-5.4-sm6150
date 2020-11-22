@@ -15,6 +15,8 @@
 
 #include <linux/bitops.h>
 #include <linux/compiler.h>
+#include <linux/android_kabi.h>
+#include <linux/android_vendor.h>
 
 #include <linux/netfilter/nf_conntrack_common.h>
 #include <linux/netfilter/nf_conntrack_tcp.h>
@@ -112,8 +114,17 @@ struct nf_conn {
 	unsigned long nattype_entry;
 #endif
 
+#ifdef CONFIG_ENABLE_SFE
+	void *sfe_entry;
+#endif
+
 	/* Storage reserved for other modules, must be the last member */
 	union nf_conntrack_proto proto;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+
+	ANDROID_VENDOR_DATA(1);
 };
 
 static inline struct nf_conn *

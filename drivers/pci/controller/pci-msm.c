@@ -1204,6 +1204,29 @@ static void pcie_parf_dump(struct msm_pcie_dev_t *dev)
 	}
 }
 
+static void pcie_dm_core_dump(struct msm_pcie_dev_t *dev)
+{
+	int i, size;
+
+	PCIE_DUMP(dev, "PCIe: RC%d DBI/dm_core register dump\n", dev->rc_idx);
+
+	size = resource_size(dev->res[MSM_PCIE_RES_DM_CORE].resource);
+
+	for (i = 0; i < size; i += 32) {
+		PCIE_DUMP(dev,
+			"RC%d: 0x%04x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+			dev->rc_idx, i,
+			readl_relaxed(dev->dm_core + i),
+			readl_relaxed(dev->dm_core + (i + 4)),
+			readl_relaxed(dev->dm_core + (i + 8)),
+			readl_relaxed(dev->dm_core + (i + 12)),
+			readl_relaxed(dev->dm_core + (i + 16)),
+			readl_relaxed(dev->dm_core + (i + 20)),
+			readl_relaxed(dev->dm_core + (i + 24)),
+			readl_relaxed(dev->dm_core + (i + 28)));
+	}
+}
+
 static void msm_pcie_show_status(struct msm_pcie_dev_t *dev)
 {
 	PCIE_DBG_FS(dev, "PCIe: RC%d is %s enumerated\n",
@@ -3779,7 +3802,7 @@ static int msm_pcie_link_train(struct msm_pcie_dev_t *dev)
 	msm_pcie_write_mask(dev->dm_core,
 		PCIE_GEN3_EQ_CONTROL, 0x20);
 
-	msm_pcie_write_mask(dev->dm_core + PCIE_GEN3_EQ_CONTROL,
+	msm_pcie_write_reg_field(dev->dm_core, PCIE_GEN3_EQ_CONTROL,
 				PCIE_GEN3_EQ_PSET_REQ_VEC_MASK,
 				dev->eq_pset_req_vec);
 
@@ -3797,7 +3820,7 @@ static int msm_pcie_link_train(struct msm_pcie_dev_t *dev)
 	if (dev->target_link_speed)
 		msm_pcie_write_reg_field(dev->dm_core,
 			PCIE20_CAP + PCI_EXP_LNKCTL2,
-			PCI_EXP_LNKCAP_SLS, dev->target_link_speed);
+			PCI_EXP_LNKCTL2_TLS, dev->target_link_speed);
 
 	/* set max tlp read size */
 	msm_pcie_write_reg_field(dev->dm_core, PCIE20_DEVICE_CONTROL_STATUS,
@@ -3861,7 +3884,7 @@ static int msm_pcie_link_train(struct msm_pcie_dev_t *dev)
 		if (bw_scale->cx_vreg_min < dev->cx_vreg->min_v) {
 			msm_pcie_write_reg_field(dev->dm_core,
 				PCIE20_CAP + PCI_EXP_LNKCTL2,
-				PCI_EXP_LNKCAP_SLS, current_link_speed);
+				PCI_EXP_LNKCTL2_TLS, current_link_speed);
 			msm_pcie_scale_link_bandwidth(dev, current_link_speed);
 		}
 	}
@@ -4750,6 +4773,13 @@ static void msm_pcie_handle_linkdown(struct msm_pcie_dev_t *dev)
 
 	dev->link_status = MSM_PCIE_LINK_DOWN;
 	dev->shadow_en = false;
+
+	/* PCIe registers dump on link down */
+	PCIE_DUMP(dev, "PCIe:Linkdown IRQ for RC%d Dumping PCIe registers\n",
+		dev->rc_idx);
+	pcie_phy_dump(dev);
+	pcie_parf_dump(dev);
+	pcie_dm_core_dump(dev);
 
 	/* assert PERST */
 	if (!(msm_pcie_keep_resources_on & BIT(dev->rc_idx)))
@@ -6025,7 +6055,7 @@ int msm_pcie_set_link_bandwidth(struct pci_dev *pci_dev, u16 target_link_speed,
 		msm_pcie_config_clear_set_dword(root_pci_dev,
 						root_pci_dev->pcie_cap +
 						PCI_EXP_LNKCTL2,
-						PCI_EXP_LNKSTA_CLS,
+						PCI_EXP_LNKCTL2_TLS,
 						target_link_speed);
 
 	/* need to be in L0 for gen switch */
@@ -6756,8 +6786,8 @@ static int msm_pcie_drv_send_rpmsg(struct msm_pcie_dev_t *pcie_dev,
 
 	mutex_lock(&pcie_drv.rpmsg_lock);
 	if (!pcie_drv.rpdev) {
-		mutex_unlock(&pcie_drv.rpmsg_lock);
-		return -EIO;
+		ret = -EIO;
+		goto out;
 	}
 
 	reinit_completion(&drv_info->completion);
@@ -6775,10 +6805,8 @@ static int msm_pcie_drv_send_rpmsg(struct msm_pcie_dev_t *pcie_dev,
 	if (ret) {
 		PCIE_ERR(pcie_dev, "PCIe: RC%d: DRV: failed to send rpmsg\n",
 			pcie_dev->rc_idx);
-		mutex_unlock(&pcie_drv.rpmsg_lock);
-		return ret;
+		goto out;
 	}
-	mutex_unlock(&pcie_drv.rpmsg_lock);
 
 	ret = wait_for_completion_timeout(&drv_info->completion,
 					msecs_to_jiffies(drv_info->timeout_ms));
@@ -6786,13 +6814,19 @@ static int msm_pcie_drv_send_rpmsg(struct msm_pcie_dev_t *pcie_dev,
 		PCIE_ERR(pcie_dev,
 			"PCIe: RC%d: DRV: completion timeout for rpmsg\n",
 			pcie_dev->rc_idx);
-		return -ETIMEDOUT;
+		ret = -ETIMEDOUT;
+		goto out;
 	}
+
+	ret = 0;
 
 	PCIE_DBG(pcie_dev, "PCIe: RC%d: DRV: rpmsg successfully sent\n",
 		pcie_dev->rc_idx);
 
-	return 0;
+out:
+	mutex_unlock(&pcie_drv.rpmsg_lock);
+
+	return ret;
 }
 
 static int msm_pcie_drv_resume(struct msm_pcie_dev_t *pcie_dev)

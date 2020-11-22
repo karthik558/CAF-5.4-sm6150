@@ -276,10 +276,8 @@ static void __cqhci_enable(struct cqhci_host *cq_host)
 	if (cq_host->caps & CQHCI_TASK_DESC_SZ_128)
 		cqcfg |= CQHCI_TASK_DESC_SZ;
 
-	if (cqhci_host_is_crypto_supported(cq_host)) {
-		cqhci_crypto_enable(cq_host);
+	if (cqhci_host_is_crypto_supported(cq_host))
 		cqcfg |= CQHCI_ICE_ENABLE;
-	}
 
 	cqhci_writel(cq_host, cqcfg, CQHCI_CFG);
 
@@ -313,9 +311,6 @@ static void __cqhci_enable(struct cqhci_host *cq_host)
 static void __cqhci_disable(struct cqhci_host *cq_host)
 {
 	u32 cqcfg;
-
-	if (cqhci_host_is_crypto_supported(cq_host))
-		cqhci_crypto_disable(cq_host);
 
 	cqcfg = cqhci_readl(cq_host, CQHCI_CFG);
 	cqcfg &= ~CQHCI_ENABLE;
@@ -367,6 +362,9 @@ static int cqhci_enable(struct mmc_host *mmc, struct mmc_card *card)
 		return err;
 	}
 
+	if (cqhci_host_is_crypto_supported(cq_host))
+		cqhci_crypto_enable(cq_host);
+
 	__cqhci_enable(cq_host);
 
 	cq_host->enabled = true;
@@ -403,8 +401,10 @@ static void cqhci_off(struct mmc_host *mmc)
 				 reg & CQHCI_HALT, 0, CQHCI_OFF_TIMEOUT);
 	if (err < 0)
 		pr_err("%s: cqhci: CQE stuck on\n", mmc_hostname(mmc));
-	else
+	else {
 		pr_debug("%s: cqhci: CQE off\n", mmc_hostname(mmc));
+		mmc_log_string(mmc, "cqhci: CQE off\n");
+	}
 
 	mmc->cqe_on = false;
 }
@@ -417,6 +417,9 @@ static void cqhci_disable(struct mmc_host *mmc)
 		return;
 
 	cqhci_off(mmc);
+
+	if (cqhci_host_is_crypto_supported(cq_host))
+		cqhci_crypto_disable(cq_host);
 
 	__cqhci_disable(cq_host);
 
@@ -637,6 +640,7 @@ static int cqhci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	if (!mmc->cqe_on) {
 		cqhci_writel(cq_host, 0, CQHCI_CTL);
 		mmc->cqe_on = true;
+		mmc_log_string(mmc, "cqhci: CQE on\n");
 		pr_debug("%s: cqhci: CQE on\n", mmc_hostname(mmc));
 		if (cqhci_readl(cq_host, CQHCI_CTL) && CQHCI_HALT) {
 			pr_err("%s: cqhci: CQE failed to exit halt state\n",
@@ -756,6 +760,8 @@ static void cqhci_error_irq(struct mmc_host *mmc, u32 status, int cmd_error,
 
 	pr_debug("%s: cqhci: error IRQ status: 0x%08x cmd error %d data error %d TERRI: 0x%08x\n",
 		 mmc_hostname(mmc), status, cmd_error, data_error, terri);
+	mmc_log_string(mmc, "cqhci: status:0x%08x TERRI:0x%08x\n",
+		status, terri);
 
 	/* Forget about errors when recovery has already been triggered */
 	if (cq_host->recovery_halt)
@@ -853,19 +859,24 @@ static void cqhci_finish_mrq(struct mmc_host *mmc, unsigned int tag)
 irqreturn_t cqhci_irq(struct mmc_host *mmc, u32 intmask, int cmd_error,
 		      int data_error)
 {
-	u32 status;
+	u32 status, ice_err;
 	unsigned long tag = 0, comp_status;
 	struct cqhci_host *cq_host = mmc->cqe_private;
 
 	status = cqhci_readl(cq_host, CQHCI_IS);
 	cqhci_writel(cq_host, status, CQHCI_IS);
+	ice_err = status & (CQHCI_IS_GCE | CQHCI_IS_ICCE);
 
 	pr_debug("%s: cqhci: IRQ status: 0x%08x\n", mmc_hostname(mmc), status);
 	mmc_log_string(mmc, "CQIS: 0x%x cmd_error : %d data_err: %d\n",
 			status, cmd_error, data_error);
 
-	if ((status & CQHCI_IS_RED) || cmd_error || data_error)
+	if ((status & CQHCI_IS_RED) || cmd_error || data_error || ice_err) {
+#if defined(CONFIG_SDC_QTI)
+		mmc->need_hw_reset = true;
+#endif
 		cqhci_error_irq(mmc, status, cmd_error, data_error);
+	}
 
 	if (status & CQHCI_IS_TCC) {
 		/* read TCN and complete the request */
