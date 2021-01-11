@@ -1715,6 +1715,7 @@ static void arm_smmu_write_context_bank(struct arm_smmu_device *smmu, int idx,
 
 		reg |= FIELD_PREP(SCTLR_WACFG, SCTLR_WACFG_WA) |
 		       FIELD_PREP(SCTLR_RACFG, SCTLR_RACFG_RA) |
+		       FIELD_PREP(SCTLR_SHCFG, SCTLR_SHCFG_OSH) |
 		       SCTLR_MTCFG |
 		       FIELD_PREP(SCTLR_MEM_ATTR, SCTLR_MEM_ATTR_OISH_WB_CACHE);
 	} else {
@@ -3288,7 +3289,6 @@ static size_t arm_smmu_unmap(struct iommu_domain *domain, unsigned long iova,
 	arm_smmu_rpm_get(smmu);
 	spin_lock_irqsave(&smmu_domain->cb_lock, flags);
 	ret = ops->unmap(ops, iova, size, gather);
-	arm_smmu_deferred_flush(smmu_domain);
 	spin_unlock_irqrestore(&smmu_domain->cb_lock, flags);
 	arm_smmu_rpm_put(smmu);
 
