@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/memory.h>
@@ -22,6 +22,7 @@
 #include <linux/vmstat.h>
 #include <linux/mailbox_client.h>
 #include <linux/mailbox/qmp.h>
+#include <linux/page-isolation.h>
 #include <asm/tlbflush.h>
 #include <asm/cacheflush.h>
 #include <soc/qcom/rpm-smd.h>
@@ -460,6 +461,12 @@ static void isolate_free_pages(struct movable_zone_fill_control *fc)
 			continue;
 		}
 
+		if (!(start_pfn % pageblock_nr_pages) &&
+			is_migrate_isolate_page(page)) {
+			start_pfn += pageblock_nr_pages - 1;
+			continue;
+		}
+
 		if (!PageBuddy(page))
 			continue;
 
@@ -476,8 +483,9 @@ static void isolate_free_pages(struct movable_zone_fill_control *fc)
 		 * returning once we have SWAP_CLUSTER_MAX pages in the
 		 * free list for migration.
 		 */
-		if (fc->nr_free_pages >= SWAP_CLUSTER_MAX ||
-			has_pend_offline_req)
+		if (!((start_pfn + 1) % pageblock_nr_pages) &&
+			(fc->nr_free_pages >= SWAP_CLUSTER_MAX ||
+			has_pend_offline_req))
 			break;
 	}
 	fc->start_pfn = start_pfn + 1;

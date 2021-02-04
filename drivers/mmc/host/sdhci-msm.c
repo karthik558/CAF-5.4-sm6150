@@ -443,7 +443,7 @@ struct sdhci_msm_host {
 	struct delayed_work bus_vote_work;
 	struct delayed_work clk_gating_work;
 	bool pltfm_init_done;
-	bool core_3_0v_support;
+	bool fake_core_3_0v_support;
 	bool use_7nm_dll;
 	struct sdhci_msm_dll_hsr *dll_hsr;
 	struct sdhci_msm_regs_restore regs_restore;
@@ -1675,6 +1675,16 @@ static void sdhci_msm_set_uhs_signaling(struct sdhci_host *host,
 		sdhci_msm_hs400(host, &mmc->ios);
 }
 
+/*
+ * Ensure larger discard size by always setting max_busy_timeout to zero.
+ * This will always return max_busy_timeout as zero to the sdhci layer.
+ */
+
+static unsigned int sdhci_msm_get_max_timeout_count(struct sdhci_host *host)
+{
+	return 0;
+}
+
 #define MAX_PROP_SIZE 32
 static int sdhci_msm_dt_parse_vreg_info(struct device *dev,
 		struct sdhci_msm_reg_data **vreg_data, const char *vreg_name)
@@ -1812,7 +1822,7 @@ static bool sdhci_msm_populate_pdata(struct device *dev,
 	}
 
 	if (of_get_property(np, "qcom,core_3_0v_support", NULL))
-		msm_host->core_3_0v_support = true;
+		msm_host->fake_core_3_0v_support = true;
 
 	msm_host->regs_restore.is_supported =
 		of_property_read_bool(np, "qcom,restore-after-cx-collapse");
@@ -2378,7 +2388,8 @@ static void sdhci_msm_handle_pwr_irq(struct sdhci_host *host, int irq)
 		new_config = config;
 
 		if ((io_level & REQ_IO_HIGH) &&
-				(msm_host->caps_0 & CORE_3_0V_SUPPORT))
+				(msm_host->caps_0 & CORE_3_0V_SUPPORT) &&
+				!msm_host->fake_core_3_0v_support)
 			new_config &= ~CORE_IO_PAD_PWR_SWITCH;
 		else if ((io_level & REQ_IO_LOW) ||
 				(msm_host->caps_0 & CORE_1_8V_SUPPORT))
@@ -2862,7 +2873,7 @@ static inline int sdhci_msm_bus_set_vote(struct sdhci_msm_host *msm_host,
 	struct sdhci_msm_bus_vote_data *bvd = msm_host->bus_vote_data;
 	struct msm_bus_path *usecase = bvd->usecase;
 	struct msm_bus_vectors *vec = usecase[vote].vec;
-	int ddr_rc, cpu_rc;
+	int ddr_rc = 0, cpu_rc = 0;
 
 	if (vote == bvd->curr_vote)
 		return 0;
@@ -2870,8 +2881,13 @@ static inline int sdhci_msm_bus_set_vote(struct sdhci_msm_host *msm_host,
 	pr_debug("%s: vote:%d sdhc_ddr ab:%llu ib:%llu cpu_sdhc ab:%llu ib:%llu\n",
 			mmc_hostname(host->mmc), vote, vec[0].ab,
 			vec[0].ib, vec[1].ab, vec[1].ib);
-	ddr_rc = icc_set_bw(bvd->sdhc_ddr, vec[0].ab, vec[0].ib);
-	cpu_rc = icc_set_bw(bvd->cpu_sdhc, vec[1].ab, vec[1].ib);
+
+	if (bvd->sdhc_ddr)
+		ddr_rc = icc_set_bw(bvd->sdhc_ddr, vec[0].ab, vec[0].ib);
+
+	if (bvd->cpu_sdhc)
+		cpu_rc = icc_set_bw(bvd->cpu_sdhc, vec[1].ab, vec[1].ib);
+
 	if (ddr_rc || cpu_rc) {
 		pr_err("%s: icc_set() failed\n",
 			mmc_hostname(host->mmc));
@@ -2894,8 +2910,8 @@ static void sdhci_msm_bus_get_and_set_vote(struct sdhci_host *host,
 	struct sdhci_msm_host *msm_host = sdhci_pltfm_priv(pltfm_host);
 
 	if (!msm_host->bus_vote_data ||
-		!msm_host->bus_vote_data->sdhc_ddr ||
-		!msm_host->bus_vote_data->cpu_sdhc)
+		(!msm_host->bus_vote_data->sdhc_ddr &&
+		!msm_host->bus_vote_data->cpu_sdhc))
 		return;
 	vote = sdhci_msm_bus_get_vote_for_bw(msm_host, bw);
 	sdhci_msm_bus_set_vote(msm_host, vote);
@@ -3004,20 +3020,16 @@ static int sdhci_msm_bus_register(struct sdhci_msm_host *host,
 
 	bsd->sdhc_ddr = of_icc_get(&pdev->dev, "sdhc-ddr");
 	if (IS_ERR_OR_NULL(bsd->sdhc_ddr)) {
-		dev_err(&pdev->dev, "(%ld): failed getting %s path\n",
+		dev_info(&pdev->dev, "(%ld): failed getting %s path\n",
 			PTR_ERR(bsd->sdhc_ddr), "sdhc-ddr");
-		ret = PTR_ERR(bsd->sdhc_ddr);
 		bsd->sdhc_ddr = NULL;
-		return ret;
 	}
 
 	bsd->cpu_sdhc = of_icc_get(&pdev->dev, "cpu-sdhc");
 	if (IS_ERR_OR_NULL(bsd->cpu_sdhc)) {
-		dev_err(&pdev->dev, "(%ld): failed getting %s path\n",
+		dev_info(&pdev->dev, "(%ld): failed getting %s path\n",
 			PTR_ERR(bsd->cpu_sdhc), "cpu-sdhc");
-		ret = PTR_ERR(bsd->cpu_sdhc);
 		bsd->cpu_sdhc = NULL;
-		return ret;
 	}
 
 	return ret;
@@ -3028,8 +3040,11 @@ static void sdhci_msm_bus_unregister(struct device *dev,
 {
 	struct sdhci_msm_bus_vote_data *bsd = host->bus_vote_data;
 
-	icc_put(bsd->sdhc_ddr);
-	icc_put(bsd->cpu_sdhc);
+	if (bsd->sdhc_ddr)
+		icc_put(bsd->sdhc_ddr);
+
+	if (bsd->cpu_sdhc)
+		icc_put(bsd->cpu_sdhc);
 }
 
 static void sdhci_msm_bus_voting(struct sdhci_host *host, bool enable)
@@ -3452,7 +3467,7 @@ static const struct sdhci_ops sdhci_msm_ops = {
 	.get_max_clock = sdhci_msm_get_max_clock,
 	.set_bus_width = sdhci_set_bus_width,
 	.set_uhs_signaling = sdhci_msm_set_uhs_signaling,
-
+	.get_max_timeout_count = sdhci_msm_get_max_timeout_count,
 #if defined(CONFIG_SDC_QTI)
 	.dump_vendor_regs = sdhci_msm_dump_vendor_regs,
 #endif
@@ -3509,7 +3524,7 @@ static void sdhci_set_default_hw_caps(struct sdhci_msm_host *msm_host,
 		msm_host->use_14lpp_dll_reset = true;
 
 	/* Fake 3.0V support for SDIO devices which requires such voltage */
-	if (msm_host->core_3_0v_support) {
+	if (msm_host->fake_core_3_0v_support) {
 		caps |= CORE_3_0V_SUPPORT;
 			writel_relaxed((readl_relaxed(host->ioaddr +
 			SDHCI_CAPABILITIES) | caps), host->ioaddr +
@@ -4413,12 +4428,6 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		goto pm_runtime_disable;
 	sdhci_msm_set_regulator_caps(msm_host);
 
-	/*
-	 * Ensure larger discard size by setting max_busy_timeout.
-	 * This has to set only after sdhci_add_host so that our
-	 * value won't be over-written.
-	 */
-	host->mmc->max_busy_timeout = 0;
 #if defined(CONFIG_SDC_QTI)
 	sdhci_msm_init_sysfs(pdev);
 #endif

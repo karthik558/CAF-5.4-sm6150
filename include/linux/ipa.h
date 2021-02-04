@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
  */
 
 #ifndef _IPA_H_
@@ -1242,6 +1242,9 @@ enum ipa_smmu_client_type {
 	IPA_SMMU_WLAN_CLIENT,
 	IPA_SMMU_AP_CLIENT,
 	IPA_SMMU_WIGIG_CLIENT,
+	IPA_SMMU_WLAN1_CLIENT,
+	IPA_SMMU_ETH_CLIENT,
+	IPA_SMMU_ETH1_CLIENT,
 	IPA_SMMU_CLIENT_MAX
 };
 
@@ -1711,6 +1714,9 @@ typedef void (*ipa_rmnet_ctl_stop_cb)(void *user_data);
 
 typedef void (*ipa_rmnet_ctl_rx_notify_cb)(void *user_data, void *rx_data);
 
+int ipa_get_default_aggr_time_limit(enum ipa_client_type client,
+	u32 *default_aggr_time_limit);
+
 /**
  * ipa_register_ipa_ready_cb() - register a callback to be invoked
  * when IPA core driver initialization is complete.
@@ -2093,6 +2099,12 @@ static inline int ipa_unregister_rmnet_ctl_cb(void)
 
 static inline int ipa_uc_reg_rdyCB(
 	struct ipa_wdi_uc_ready_params *inout)
+{
+	return -EPERM;
+}
+
+static inline int ipa_get_default_aggr_time_limit(enum ipa_client_type client,
+	u32 *default_aggr_time_limit)
 {
 	return -EPERM;
 }
